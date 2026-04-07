@@ -18,17 +18,12 @@ import {
 } from 'recharts';
 import { BarChart3, Download, Filter, HandCoins, IndianRupee, Search, Upload, Users2, Wallet } from 'lucide-react';
 import { HeroSummary, KPIGrid, MetricPill, PageHeader, ProgressBar, SectionCard, StatusBadge, TimelineList } from '../../components/ui';
-import {
-  activityLogs,
-  alerts,
-  notifications,
-} from '../../data/mockData';
 import { currency, percent } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import { exportAdminSnapshotPDF, exportFunderImpactPDF, exportToPDF } from '../../utils/exportUtils';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabaseClient';
-import { AdminReportDashboard } from './AdminReportDashboard';
+import SnehaAshaLogo from '../../components/branding/SnehaAshaLogo';
 
 const colors = ['#de8710', '#8f4f16', '#f5a12a', '#5d2f0d'];
 
@@ -217,6 +212,7 @@ const buildReportSnapshots = (rows) => {
 
 const useDashboardData = () => {
   const [rows, setRows] = useState([]);
+  const [rawRows, setRawRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -227,9 +223,11 @@ const useDashboardData = () => {
         setError('');
         const { data, error } = await supabase.from('school_data').select('*').order('student_name');
         if (error) throw error;
+        setRawRows(data || []);
         setRows((data || []).map(buildDashboardStudent));
       } catch (err) {
         setError(err.message || 'Unable to load dashboard data.');
+        setRawRows([]);
         setRows([]);
       } finally {
         setLoading(false);
@@ -239,7 +237,7 @@ const useDashboardData = () => {
     loadRows();
   }, []);
 
-  return { rows, loading, error };
+  return { rows, rawRows, loading, error };
 };
 
 const ChartBlock = ({ title, subtitle, children }) => (
@@ -259,6 +257,488 @@ const buildAmountByCategory = (rows, categorySelector, valueSelector = (row) => 
       return acc;
     }, {})
   );
+
+const compactNumber = (value) =>
+  new Intl.NumberFormat('en-IN', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(toNumber(value));
+
+const formatTransactionValue = (value) => {
+  const amount = toNumber(value);
+  return amount ? currency(amount) : '-';
+};
+
+const normalizeFilterValue = (value, fallback = 'Unknown') => {
+  const text = `${value ?? ''}`.trim();
+  return text || fallback;
+};
+
+const chartToolbar = (
+  <div className="flex items-center gap-3 text-slate-400">
+    <button className="transition hover:text-slate-600" aria-label="Filter chart">
+      <Filter className="h-4 w-4" />
+    </button>
+    <button className="transition hover:text-slate-600" aria-label="Download chart">
+      <Download className="h-4 w-4" />
+    </button>
+  </div>
+);
+
+const SummaryCard = ({ label, value, icon }) => (
+  <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+    <div className="flex items-center justify-between gap-4">
+      <p className="text-sm font-semibold text-slate-500">{label}</p>
+      <div className="rounded-2xl bg-slate-100 p-3 text-slate-600">{icon}</div>
+    </div>
+    <p className="mt-8 text-5xl font-bold tracking-[-0.04em] text-slate-900">{value}</p>
+  </div>
+);
+
+const AdminReportDashboard = () => {
+  const navigate = useNavigate();
+  const { addNotification } = useAuth();
+  const { rows, rawRows, loading, error } = useDashboardData();
+  const [selectedSheet, setSelectedSheet] = useState('All Batch');
+  const [selectedGender, setSelectedGender] = useState('All');
+  const [selectedAge, setSelectedAge] = useState('All');
+  const [selectedPassingYear, setSelectedPassingYear] = useState('All');
+  const [selectedIntegrated, setSelectedIntegrated] = useState('All');
+  const [tableSearch, setTableSearch] = useState('');
+  const [viewMode, setViewMode] = useState('dashboard');
+
+  const sheetCounts = useMemo(() => {
+    const counts = rows.reduce((acc, row) => {
+      const key = normalizeFilterValue(row.sourceSheet);
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    return [
+      { key: 'Summary Dashboard', count: Object.keys(counts).length },
+      ...Object.entries(counts).map(([key, count]) => ({ key, count })),
+    ];
+  }, [rows]);
+
+  const availableSheets = useMemo(
+    () => sheetCounts.map((item) => item.key),
+    [sheetCounts]
+  );
+
+  useEffect(() => {
+    if (!availableSheets.includes(selectedSheet) && availableSheets.includes('All Batch')) {
+      setSelectedSheet('All Batch');
+    }
+  }, [availableSheets, selectedSheet]);
+
+  const sheetRows = useMemo(() => {
+    if (selectedSheet === 'Summary Dashboard') {
+      return rows;
+    }
+    return rows.filter((row) => normalizeFilterValue(row.sourceSheet) === selectedSheet);
+  }, [rows, selectedSheet]);
+
+  const filterOptions = useMemo(() => {
+    const uniqueValues = (selector) => [
+      'All',
+      ...new Set(sheetRows.map(selector).map((value) => normalizeFilterValue(value))).values(),
+    ];
+
+    return {
+      genders: uniqueValues((row) => row.gender),
+      ages: uniqueValues((row) => row.age),
+      passingYears: uniqueValues((row) => row.yearOfPassingSSC),
+      integrated: uniqueValues((row) => row.integrated),
+    };
+  }, [sheetRows]);
+
+  const filteredRows = useMemo(
+    () =>
+      sheetRows.filter((row) => {
+        if (selectedGender !== 'All' && normalizeFilterValue(row.gender) !== selectedGender) return false;
+        if (selectedAge !== 'All' && normalizeFilterValue(row.age) !== selectedAge) return false;
+        if (selectedPassingYear !== 'All' && normalizeFilterValue(row.yearOfPassingSSC) !== selectedPassingYear) return false;
+        if (selectedIntegrated !== 'All' && normalizeFilterValue(row.integrated) !== selectedIntegrated) return false;
+        return true;
+      }),
+    [sheetRows, selectedGender, selectedAge, selectedPassingYear, selectedIntegrated]
+  );
+
+  const searchedRows = useMemo(() => {
+    const query = tableSearch.trim().toLowerCase();
+    if (!query) return filteredRows;
+    return filteredRows.filter((row) =>
+      [row.name, row.schoolName, row.pen, row.programName]
+        .filter(Boolean)
+        .some((value) => `${value}`.toLowerCase().includes(query))
+    );
+  }, [filteredRows, tableSearch]);
+
+  const totalTransactions = filteredRows.length;
+  const totalDonations = filteredRows.reduce((sum, row) => sum + row.totalAmount, 0);
+  const averageGift = totalTransactions ? totalDonations / totalTransactions : 0;
+  const fieldCount = useMemo(() => {
+    const keys = new Set();
+    rawRows.forEach((row) => {
+      Object.keys(row || {}).forEach((key) => keys.add(key));
+    });
+    return keys.size;
+  }, [rawRows]);
+  const totalSheets = useMemo(
+    () => new Set(rows.map((row) => normalizeFilterValue(row.sourceSheet))).size,
+    [rows]
+  );
+  const totalSchools = useMemo(
+    () => new Set(filteredRows.map((row) => normalizeFilterValue(row.schoolName))).size,
+    [filteredRows]
+  );
+  const totalBeneficiaries = useMemo(
+    () => new Set(filteredRows.map((row) => row.pen || row.id)).size,
+    [filteredRows]
+  );
+
+  const amount11thTrend = useMemo(
+    () =>
+      buildMonthlyTrend(filteredRows).map((item) => ({
+        month: item.month,
+        amount11th: filteredRows
+          .filter((row) => formatMonthLabel(row.updatedOn || row.created_at || new Date()) === item.month)
+          .reduce((sum, row) => sum + row.amount11th, 0),
+      })),
+    [filteredRows]
+  );
+
+  const topStudentsBy11th = useMemo(
+    () =>
+      [...filteredRows]
+        .filter((row) => row.amount11th > 0)
+        .sort((a, b) => b.amount11th - a.amount11th)
+        .slice(0, 10)
+        .map((row) => ({
+          name: row.name.length > 18 ? `${row.name.slice(0, 18)}...` : row.name,
+          amount11th: row.amount11th,
+        })),
+    [filteredRows]
+  );
+
+  const amount11thBy14th = useMemo(
+    () =>
+      Object.values(
+        filteredRows.reduce((acc, row) => {
+          const key = row.amount14th ? `${row.amount14th}` : 'Unknown';
+          if (!acc[key]) {
+            acc[key] = { name: key, amount11th: 0 };
+          }
+          acc[key].amount11th += row.amount11th;
+          return acc;
+        }, {})
+      ),
+    [filteredRows]
+  );
+
+  const amountShareBy14th = useMemo(
+    () =>
+      amount11thBy14th.map((item, index) => ({
+        ...item,
+        fill: colors[index % colors.length],
+      })),
+    [amount11thBy14th]
+  );
+
+  const schoolComboData = useMemo(
+    () =>
+      Object.values(
+        filteredRows.reduce((acc, row) => {
+          const key = normalizeFilterValue(row.schoolName);
+          if (!acc[key]) {
+            acc[key] = {
+              name: key.length > 22 ? `${key.slice(0, 22)}...` : key,
+              amount11th: 0,
+              amount12th: 0,
+              coachingYear1: 0,
+              coachingYear2: 0,
+              totalAmount: 0,
+            };
+          }
+          acc[key].amount11th += row.amount11th;
+          acc[key].amount12th += row.amount12th;
+          acc[key].coachingYear1 += row.coachingYear1;
+          acc[key].coachingYear2 += row.coachingYear2;
+          acc[key].totalAmount += row.totalAmount;
+          return acc;
+        }, {})
+      )
+        .sort((a, b) => b.totalAmount - a.totalAmount)
+        .slice(0, 8),
+    [filteredRows]
+  );
+
+  const coachingShareByAge = useMemo(
+    () =>
+      Object.values(
+        filteredRows.reduce((acc, row) => {
+          const key = normalizeFilterValue(row.age);
+          if (!acc[key]) {
+            acc[key] = { name: key, value: 0 };
+          }
+          acc[key].value += row.coachingYear1;
+          return acc;
+        }, {})
+      ),
+    [filteredRows]
+  );
+
+  const handleExport = () => {
+    exportToPDF('admin-report-dashboard', 'snehasha-dashboard.pdf', {
+      title: 'SnehaAsha Dashboard',
+    });
+    addNotification('Dashboard export', 'The donor-ready dashboard PDF was generated from live school data.', 'Success');
+  };
+
+  return (
+    <div className="space-y-6">
+      {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
+
+      <div className="rounded-[28px] border border-slate-200 bg-white px-6 py-4 shadow-sm">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+            <BarChart3 className="h-4 w-4" />
+            Sheets
+          </div>
+          {sheetCounts.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setSelectedSheet(tab.key)}
+              className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                selectedSheet === tab.key
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-200 bg-white text-slate-500 hover:border-brand-200 hover:text-slate-900'
+              }`}
+            >
+              <span>{tab.key}</span>
+              <span className={`rounded-full px-2 py-0.5 text-xs ${selectedSheet === tab.key ? 'bg-white/20 text-white' : 'bg-amber-400 text-slate-900'}`}>
+                {tab.count}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div id="admin-report-dashboard" className="space-y-6 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
+          <div className="flex min-w-0 gap-5">
+            <SnehaAshaLogo compact className="shrink-0" />
+            <div className="min-w-0">
+              <h1 className="font-display text-4xl font-bold tracking-[-0.04em] text-slate-900">Snehasha Dashboard</h1>
+              <p className="mt-1 text-sm text-slate-500">
+                {selectedSheet} · {totalTransactions} transactions · {fieldCount} fields · {totalSheets} sheets
+              </p>
+              <p className="mt-2 text-base text-slate-600">
+                Live database reporting view generated from the connected `school_data` records.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="inline-flex rounded-full bg-amber-100 p-1">
+              {['dashboard', 'donorProfiles'].map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setViewMode(mode)}
+                  className={`rounded-full px-5 py-2 text-sm font-semibold transition ${
+                    viewMode === mode ? 'bg-slate-900 text-white' : 'text-slate-600'
+                  }`}
+                >
+                  {mode === 'dashboard' ? 'Dashboard' : 'Donor Profiles'}
+                </button>
+              ))}
+            </div>
+            <button onClick={handleExport} className="rounded-full bg-amber-400 px-6 py-3 text-sm font-semibold text-slate-950 transition hover:bg-amber-300">
+              Export PDF
+            </button>
+            <button
+              onClick={() => navigate('/students')}
+              className="rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              New Upload
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-3">
+          <select value={selectedSheet} onChange={(event) => setSelectedSheet(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+            {availableSheets.map((sheet) => (
+              <option key={sheet} value={sheet}>{sheet}</option>
+            ))}
+          </select>
+          <select value={selectedGender} onChange={(event) => setSelectedGender(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+            {filterOptions.genders.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+          <select value={selectedAge} onChange={(event) => setSelectedAge(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+            {filterOptions.ages.map((option) => <option key={option} value={option}>{option === 'All' ? 'Age' : option}</option>)}
+          </select>
+          <select value={selectedPassingYear} onChange={(event) => setSelectedPassingYear(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+            {filterOptions.passingYears.map((option) => <option key={option} value={option}>{option === 'All' ? 'Year Of Passing SSC' : option}</option>)}
+          </select>
+          <select value={selectedIntegrated} onChange={(event) => setSelectedIntegrated(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+            {filterOptions.integrated.map((option) => <option key={option} value={option}>{option === 'All' ? 'Integrated Yes Or No' : option}</option>)}
+          </select>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-4">
+          <SummaryCard label="Total Transactions" value={compactNumber(totalTransactions)} icon={<span className="text-2xl font-bold">#</span>} />
+          <SummaryCard label="Total Beneficiaries" value={compactNumber(totalBeneficiaries)} icon={<Users2 className="h-6 w-6" />} />
+          <SummaryCard label="Total Donations" value={compactNumber(totalDonations)} icon={<IndianRupee className="h-6 w-6" />} />
+          <SummaryCard label="Schools Covered" value={compactNumber(totalSchools)} icon={<Wallet className="h-6 w-6" />} />
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-2">
+          <SectionCard title="11th College Amount Over Time" actions={chartToolbar}>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={amount11thTrend}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="month" />
+                  <YAxis />
+                  <Tooltip formatter={(value) => currency(value)} />
+                  <Line type="monotone" dataKey="amount11th" stroke="#1f3b69" strokeWidth={3} dot={{ r: 4 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="Top 10 Name Of Student by 11th College Amount" actions={chartToolbar}>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={topStudentsBy11th}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-20} textAnchor="end" height={70} />
+                  <YAxis />
+                  <Tooltip formatter={(value) => currency(value)} />
+                  <Bar dataKey="amount11th" fill="#1f3b69" radius={[8, 8, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="11th College Amount by 14th College Amount" actions={chartToolbar}>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={amount11thBy14th}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-20} textAnchor="end" height={60} />
+                  <YAxis />
+                  <Tooltip formatter={(value) => currency(value)} />
+                  <Bar dataKey="amount11th" fill="#1f3b69" radius={[8, 8, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="11th College Amount Share by 14th College Amount" actions={chartToolbar}>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={amountShareBy14th} dataKey="amount11th" nameKey="name" innerRadius={65} outerRadius={100} paddingAngle={3}>
+                    {amountShareBy14th.map((entry) => (
+                      <Cell key={entry.name} fill={entry.fill} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => currency(value)} />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="11th College Amount & 12th College Amount & 1st Year Coaching Amount" actions={chartToolbar}>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={schoolComboData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-20} textAnchor="end" height={70} />
+                  <YAxis />
+                  <Tooltip formatter={(value) => currency(value)} />
+                  <Legend />
+                  <Bar dataKey="amount11th" fill="#1f3b69" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="amount12th" fill="#f59e0b" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="coachingYear1" fill="#2ca6a4" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="1st Year Coaching Amount Share by Age" actions={chartToolbar}>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={coachingShareByAge} dataKey="value" nameKey="name" innerRadius={65} outerRadius={100} paddingAngle={3}>
+                    {coachingShareByAge.map((entry, index) => (
+                      <Cell key={entry.name} fill={colors[index % colors.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => currency(value)} />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
+        </div>
+
+        <SectionCard
+          title={viewMode === 'dashboard' ? 'Donor Transactions' : 'Donor Profiles'}
+          actions={(
+            <div className="flex items-center gap-3 rounded-2xl bg-amber-400 px-4 py-2 text-slate-900">
+              <Search className="h-4 w-4" />
+              <input
+                value={tableSearch}
+                onChange={(event) => setTableSearch(event.target.value)}
+                placeholder="Search..."
+                className="bg-transparent text-sm font-medium outline-none placeholder:text-slate-700/70"
+              />
+            </div>
+          )}
+        >
+          <div className="mb-4 flex flex-wrap gap-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+            <span className="rounded-full bg-slate-100 px-3 py-1">Rows: {searchedRows.length}</span>
+            <span className="rounded-full bg-slate-100 px-3 py-1">Current Sheet: {selectedSheet}</span>
+            <span className="rounded-full bg-slate-100 px-3 py-1">Live Source: school_data</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-separate border-spacing-0 overflow-hidden rounded-3xl">
+              <thead>
+                <tr className="bg-amber-400 text-left text-sm font-semibold text-slate-900">
+                  {['11th College Amount', '12th College Amount', '1st Year Coaching Amount', '2nd Year Coaching Amount', '14th College Amount', 'Total Amount', 'Student', 'School'].map((heading) => (
+                    <th key={heading} className="px-4 py-3 whitespace-nowrap">{heading}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(loading ? [] : searchedRows).slice(0, 20).map((row) => (
+                  <tr key={row.id} className="border-b border-slate-100 text-sm text-slate-700">
+                    <td className="px-4 py-3">{formatTransactionValue(row.amount11th)}</td>
+                    <td className="px-4 py-3">{formatTransactionValue(row.amount12th)}</td>
+                    <td className="px-4 py-3">{formatTransactionValue(row.coachingYear1)}</td>
+                    <td className="px-4 py-3">{formatTransactionValue(row.coachingYear2)}</td>
+                    <td className="px-4 py-3">{formatTransactionValue(row.amount14th)}</td>
+                    <td className="px-4 py-3 font-semibold text-slate-900">{formatTransactionValue(row.totalAmount)}</td>
+                    <td className="px-4 py-3">{row.name}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.schoolName}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!loading && !searchedRows.length ? (
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
+              No rows matched the selected filters.
+            </div>
+          ) : null}
+        </SectionCard>
+      </div>
+    </div>
+  );
+};
 
 export const AdminDashboard = () => {
   const navigate = useNavigate();
@@ -373,10 +853,10 @@ export const AdminDashboard = () => {
         severity: row.riskLevel,
         owner: row.updatedBy,
       })),
-      activityRows: activityLogs.slice(0, 8).map((item) => ({
-        message: item.message,
-        actor: item.actor,
-        time: item.time,
+      activityRows: rows.slice(0, 8).map((row) => ({
+        message: `${row.name} updated in ${row.className} / ${row.sectionName}`,
+        actor: row.updatedBy || 'System',
+        time: row.updatedOn || 'Recently',
       })),
     });
     addNotification('Snapshot exported', 'Admin dashboard snapshot was generated with the dedicated export layout.', 'Success');
@@ -544,7 +1024,27 @@ export const AdminDashboard = () => {
           </SectionCard>
 
           <SectionCard title="Recent Activity" subtitle="Live operations feed">
-            <TimelineList items={loading ? [{ id: 'loading', message: 'Loading school activity...', actor: 'System', time: 'Just now' }] : activityLogs} />
+            <TimelineList
+              items={
+                loading
+                  ? [{ id: 'loading', message: 'Loading school activity...', actor: 'System', time: 'Just now' }]
+                  : rows.slice(0, 8).map((row) => ({
+                      id: row.id,
+                      message: `${row.name} record synced from ${row.sourceSheet}`,
+                      actor: row.updatedBy || 'System',
+                      time: row.updatedOn || 'Recently',
+                    }))
+              }
+            />
+          </SectionCard>
+
+          <SectionCard title="Database Snapshot" subtitle="Directly derived from the connected school_data table">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <MetricPill label="Rows Loaded" value={rows.length} />
+              <MetricPill label="Fields Detected" value={fieldCount} />
+              <MetricPill label="Sheets Found" value={totalSheets} />
+              <MetricPill label="Schools Found" value={new Set(rows.map((row) => normalizeFilterValue(row.schoolName))).size} />
+            </div>
           </SectionCard>
         </div>
       </div>
@@ -797,10 +1297,12 @@ export const StudentDashboard = () => {
 
           <SectionCard title="Notifications" subtitle="Messages from your NGO support team">
             <div className="space-y-3">
-              {notifications.map((notification) => (
-                <div key={notification.id} className="rounded-2xl border border-slate-200 p-4">
-                  <div className="flex items-center justify-between"><p className="font-semibold text-slate-900">{notification.title}</p><StatusBadge status={notification.type} /></div>
-                  <p className="mt-2 text-sm text-slate-500">{notification.description}</p>
+              {rows.slice(0, 4).map((notificationRow) => (
+                <div key={notificationRow.id} className="rounded-2xl border border-slate-200 p-4">
+                  <div className="flex items-center justify-between"><p className="font-semibold text-slate-900">Scholarship update</p><StatusBadge status={notificationRow.entryStatus} /></div>
+                  <p className="mt-2 text-sm text-slate-500">
+                    {notificationRow.name} has {currency(notificationRow.receivedAmount)} received against {currency(notificationRow.approvedAmount)} approved.
+                  </p>
                 </div>
               ))}
             </div>

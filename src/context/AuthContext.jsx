@@ -2,6 +2,16 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { notifications as mockNotifications, alerts as mockAlerts } from '../data/mockData';
 
 const AuthContext = createContext();
+const AUTH_STATE_KEY = 'auth_state';
+
+const parseStoredJson = (key, fallback) => {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
+};
 
 export const AuthProvider = ({ children }) => {
   const [authenticated, setAuthenticated] = useState(false);
@@ -36,9 +46,9 @@ export const AuthProvider = ({ children }) => {
 
   // Load from local storage on mount
   useEffect(() => {
-    const storedAuth = localStorage.getItem('auth_state');
+    const storedAuth = parseStoredJson(AUTH_STATE_KEY, null);
     if (storedAuth) {
-      const { authenticated, role, user, settings: storedSettings, notifications: storedNotifications } = JSON.parse(storedAuth);
+      const { authenticated, role, user, settings: storedSettings, notifications: storedNotifications } = storedAuth;
       setAuthenticated(authenticated);
       setRole(role);
       setUser(user);
@@ -48,23 +58,41 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const saveToStorage = (updates) => {
-    const currentState = JSON.parse(localStorage.getItem('auth_state') || '{}');
+    const currentState = parseStoredJson(AUTH_STATE_KEY, {});
     const newState = { ...currentState, ...updates };
-    localStorage.setItem('auth_state', JSON.stringify(newState));
+    localStorage.setItem(AUTH_STATE_KEY, JSON.stringify(newState));
+  };
+
+  const createSession = (account) => {
+    const sessionUser = {
+      id: account.id,
+      name: account.name,
+      email: account.email,
+      organization: account.organization,
+    };
+    const newState = {
+      authenticated: true,
+      role: account.role,
+      user: sessionUser,
+      settings,
+      notifications,
+    };
+    setAuthenticated(true);
+    setRole(account.role);
+    setUser(sessionUser);
+    saveToStorage(newState);
+    return sessionUser;
   };
 
   const loginAs = (selectedRole) => {
-    const newState = {
-      authenticated: true,
+    const demoUser = {
+      id: `demo-${selectedRole.toLowerCase()}`,
+      name: `Mock ${selectedRole.charAt(0) + selectedRole.slice(1).toLowerCase()}`,
+      email: 'user@example.com',
       role: selectedRole,
-      user: { name: `Mock ${selectedRole.charAt(0) + selectedRole.slice(1).toLowerCase()}`, email: 'user@example.com' },
-      settings,
-      notifications
+      organization: 'Sneha Asha',
     };
-    setAuthenticated(newState.authenticated);
-    setRole(newState.role);
-    setUser(newState.user);
-    saveToStorage(newState);
+    createSession(demoUser);
   };
 
   const updateSettings = (newSettings) => {
@@ -102,7 +130,7 @@ export const AuthProvider = ({ children }) => {
     setAuthenticated(false);
     setRole(null);
     setUser(null);
-    localStorage.removeItem('auth_state');
+    localStorage.removeItem(AUTH_STATE_KEY);
   };
 
   return (
