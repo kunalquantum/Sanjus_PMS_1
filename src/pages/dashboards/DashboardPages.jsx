@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -33,8 +34,107 @@ import { currency, percent } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import { exportAdminSnapshotPDF, exportFunderImpactPDF } from '../../utils/exportUtils';
 import { useNavigate } from 'react-router-dom';
+import { supabase } from '../../lib/supabaseClient';
 
 const colors = ['#1d70f5', '#159f6b', '#f59e0b', '#7c3aed'];
+
+const toNumber = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const formatMonthLabel = (value) =>
+  new Intl.DateTimeFormat('en-IN', { month: 'short' }).format(new Date(value));
+
+const buildDashboardStudent = (row) => {
+  const previewProfile = row.preview_profile || {};
+  const enrolmentProfile = row.enrolment_profile || {};
+  const generalProfile = row.general_profile || {};
+  const facilityProfile = row.facility_profile || {};
+  const average =
+    toNumber(previewProfile.academic_average) ||
+    toNumber(previewProfile.average) ||
+    toNumber(enrolmentProfile.academic_average);
+  const attendance =
+    toNumber(previewProfile.attendance_percent) ||
+    toNumber(previewProfile.attendance) ||
+    toNumber(generalProfile.attendance_percent);
+
+  return {
+    id: row.id,
+    name: row.student_name || 'Unknown Student',
+    className: row.class_name || 'Unassigned',
+    sectionName: row.section_name || 'A',
+    gender: row.gender || 'Unknown',
+    pen: row.pen,
+    academicYear: row.academic_year || '2025-26',
+    entryStatus: row.entry_status || 'Draft',
+    aadhaarVerified: Boolean(row.aadhaar_verified),
+    approvedAmount: toNumber(row.approved_amount),
+    receivedAmount: toNumber(row.received_amount),
+    attendance,
+    average,
+    updatedOn: row.updated_on || row.created_at,
+    updatedBy: row.updated_by || 'Admin',
+    schoolName: row.school_name || enrolmentProfile.school_name || 'Sneha Asha School Network',
+    sourceSheet: row.source_sheet || 'Excel Upload',
+    riskLevel:
+      (row.entry_status || '').toLowerCase() !== 'completed'
+        ? 'Warning'
+        : attendance && attendance < 75
+          ? 'Critical'
+          : average && average < 60
+            ? 'Warning'
+            : 'Healthy',
+    programName: row.program_name || facilityProfile.scholarshipSupport || 'General Support',
+  };
+};
+
+const buildMonthlyTrend = (rows) => {
+  const byMonth = rows.reduce((acc, row) => {
+    const rawDate = row.updatedOn || row.created_at;
+    if (!rawDate) return acc;
+    const date = new Date(rawDate);
+    if (Number.isNaN(date.getTime())) return acc;
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-01`;
+    if (!acc[key]) {
+      acc[key] = { month: formatMonthLabel(key), approved: 0, received: 0, students: 0 };
+    }
+    acc[key].approved += row.approvedAmount;
+    acc[key].received += row.receivedAmount;
+    acc[key].students += 1;
+    return acc;
+  }, {});
+
+  return Object.entries(byMonth)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-6)
+    .map(([, value]) => value);
+};
+
+const buildClassBreakdown = (rows) =>
+  Object.values(
+    rows.reduce((acc, row) => {
+      const key = row.className || 'Unassigned';
+      if (!acc[key]) {
+        acc[key] = {
+          name: key,
+          students: 0,
+          completed: 0,
+          incomplete: 0,
+          received: 0,
+        };
+      }
+      acc[key].students += 1;
+      acc[key].received += row.receivedAmount;
+      if ((row.entryStatus || '').toLowerCase() === 'completed') {
+        acc[key].completed += 1;
+      } else {
+        acc[key].incomplete += 1;
+      }
+      return acc;
+    }, {})
+  );
 
 const ChartBlock = ({ title, subtitle, children }) => (
   <SectionCard title={title} subtitle={subtitle} className="h-full">

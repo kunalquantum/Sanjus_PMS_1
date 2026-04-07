@@ -1,5 +1,8 @@
 import { useNavigate } from 'react-router-dom';
+import { Moon, Sun } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useTheme } from '../../context/ThemeContext';
+import SnehaAshaLogo from '../../components/branding/SnehaAshaLogo';
 
 const roles = [
   { key: 'ADMIN', label: 'Admin', summary: 'Govern platform governance, approvals, and cross-program reporting.' },
@@ -12,24 +15,37 @@ const roles = [
 const LoginPage = () => {
   const navigate = useNavigate();
   const { loginAs } = useAuth();
+  const { theme, toggleTheme } = useTheme();
 
   return (
-    <div className="min-h-screen bg-mesh-light px-4 py-10">
+    <div className="theme-grid min-h-screen px-4 py-10">
       <div className="mx-auto grid max-w-7xl gap-8 lg:grid-cols-[1.2fr,0.8fr]">
-        <section className="rounded-[2rem] bg-slate-950 p-8 text-white shadow-soft lg:p-12">
-          <p className="text-xs uppercase tracking-[0.3em] text-sky-200">NGO Education PMS</p>
-          <h1 className="mt-6 max-w-2xl font-display text-4xl font-bold leading-tight lg:text-6xl">
-            Production-grade prototype for scholarship transparency and student outcomes.
+        <section className="rounded-[2rem] border border-brand-100/40 bg-slate-950 p-8 text-white shadow-soft dark:border-white/10 dark:bg-[#16110f] lg:p-12">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <SnehaAshaLogo />
+              <p className="mt-5 text-xs uppercase tracking-[0.3em] text-brand-100">Sneha Asha PMS</p>
+            </div>
+            <button
+              onClick={toggleTheme}
+              className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-white"
+              aria-label="Toggle theme"
+            >
+              {theme === 'dark' ? <Sun className="h-5 w-5 text-brand-300" /> : <Moon className="h-5 w-5 text-brand-200" />}
+            </button>
+          </div>
+          <h1 className="mt-8 max-w-2xl font-display text-4xl font-bold leading-tight lg:text-6xl">
+            A warmer, donor-ready platform for scholarship visibility and student outcomes.
           </h1>
           <p className="mt-6 max-w-xl text-base text-slate-300 lg:text-lg">
-            This frontend-only environment is designed to help your team finalize product workflows before backend development. Every module uses realistic mock data, role-based routing, and enterprise-ready interaction patterns.
+            The product now reflects the Sneha Asha identity with a calmer education-first interface, Excel-driven admin workflows, and role-based operations across students, teachers, project managers, and funders.
           </p>
 
           <div className="mt-10 grid gap-4 md:grid-cols-3">
             {[
-              ['Who got the money?', 'Beneficiary coverage, approvals, installments, and program mapping.'],
-              ['How was it used?', 'Expense uploads, proof verification, utilization tracking, and audit visibility.'],
-              ['What changed?', 'Attendance recovery, academic movement, risk alerts, and impact narratives.'],
+              ['Upload once', 'Bring in the school Excel and sync the live register with class, section, and student detail records.'],
+              ['Track clearly', 'Follow attendance, academics, funding, and completion status without leaving the platform.'],
+              ['Report better', 'Prepare cleaner donor and school-facing views with branded exports and live summaries.'],
             ].map(([title, body]) => (
               <div key={title} className="rounded-3xl border border-white/10 bg-white/5 p-5">
                 <p className="text-sm font-semibold text-white">{title}</p>
@@ -39,11 +55,11 @@ const LoginPage = () => {
           </div>
         </section>
 
-        <section className="rounded-[2rem] border border-white/70 bg-white/90 p-8 shadow-soft">
-          <div className="rounded-3xl bg-slate-50 p-5">
+        <section className="rounded-[2rem] border border-white/70 bg-white/90 p-8 shadow-soft dark:border-white/10 dark:bg-white/[0.04]">
+          <div className="rounded-3xl bg-slate-50 p-5 dark:bg-white/[0.04]">
             <p className="text-sm font-semibold uppercase tracking-[0.18em] text-brand-600">Mock Access</p>
-            <h2 className="mt-2 font-display text-3xl font-bold text-slate-950">Choose a role to enter the prototype</h2>
-            <p className="mt-2 text-sm text-slate-500">Authentication is mocked at this stage so we can focus on product shaping, screen architecture, and stakeholder review.</p>
+            <h2 className="mt-2 font-display text-3xl font-bold text-slate-950 dark:text-white">Choose a role to enter the prototype</h2>
+            <p className="mt-2 text-sm text-slate-500 dark:text-white/65">Authentication is still mocked, so this screen is focused on role-based review and UI validation.</p>
           </div>
 
           <div className="mt-6 space-y-3">
@@ -54,14 +70,14 @@ const LoginPage = () => {
                   loginAs(role.key);
                   navigate('/');
                 }}
-                className="w-full rounded-3xl border border-slate-200 bg-white p-5 text-left transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-soft"
+                className="w-full rounded-3xl border border-slate-200 bg-white p-5 text-left transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-soft dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/[0.05]"
               >
                 <div className="flex items-center justify-between gap-4">
                   <div>
-                    <p className="text-base font-bold text-slate-950">{role.label}</p>
-                    <p className="mt-1 text-sm text-slate-500">{role.summary}</p>
+                    <p className="text-base font-bold text-slate-950 dark:text-white">{role.label}</p>
+                    <p className="mt-1 text-sm text-slate-500 dark:text-white/60">{role.summary}</p>
                   </div>
-                  <span className="rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">Enter</span>
+                  <span className="rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700 dark:bg-brand-500/10 dark:text-brand-300">Enter</span>
                 </div>
               </button>
             ))}
