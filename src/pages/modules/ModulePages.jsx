@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Bar,
   BarChart,
@@ -11,6 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { AlertCircle } from 'lucide-react';
 import {
   FileUploadBox,
   FilterBar,
@@ -27,19 +28,18 @@ import {
 import {
   alerts,
   allUsers,
-  attendanceRegister,
   auditLogs,
   disbursements,
   expenseRecords,
-  marksUploads,
   notifications,
   programs,
-  reportSnapshots,
   students,
 } from '../../data/mockData';
 import { currency } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import { exportReportPackPDF, exportRowsToCSV } from '../../utils/exportUtils';
+import { supabase } from '../../lib/supabaseClient';
+import { importWorkbookToSupabase, parseSchoolWorkbook } from '../../utils/schoolImport';
 
 const ModalShell = ({ open, children }) =>
   open ? (
@@ -47,6 +47,181 @@ const ModalShell = ({ open, children }) =>
       <div className="w-full max-w-3xl">{children}</div>
     </div>
   ) : null;
+
+const studentStorageKey = 'school_master_students';
+
+const schoolSections = ['A', 'B', 'C'];
+
+const getClassLabel = (grade) => {
+  if (grade <= 0) return 'Nursery/PP3';
+  return `Grade ${grade}`;
+};
+
+const getSectionCode = (student, index = 0) => schoolSections[index % schoolSections.length] || student.sectionCode || 'A';
+
+const inferGender = (student) => {
+  const femaleNames = ['Ananya', 'Priyanka', 'Juhi', 'Mansi', 'Meghana'];
+  const firstName = student.name?.split(' ')[0];
+  return femaleNames.includes(firstName) ? 'Female' : 'Male';
+};
+
+const padStudentNumber = (value) => `${value}`.replace(/\D/g, '').padStart(10, '0').slice(0, 10);
+
+const buildSchoolStudent = (student, index = 0) => {
+  const classLabel = student.classLabel || getClassLabel(student.grade);
+  const sectionCode = student.sectionCode || getSectionCode(student, index);
+  const entryStatus =
+    student.entryStatus ||
+    (student.pendingDocs?.length ? 'In Progress' : student.academicStatus === 'Review' ? 'Draft' : 'Completed');
+  const updatedBy = student.updatedBy || (student.academicStatus === 'Needs Attention' ? 'AM' : 'PM');
+  const updatedById = student.updatedById || '27221100349';
+
+  return {
+    ...student,
+    classLabel,
+    sectionCode,
+    sectionLabel: `${sectionCode} (${classLabel.replace('Grade ', 'Std ')})`,
+    academicYear: student.academicYear || '2025-26',
+    pen: student.pen || padStudentNumber(student.studentId || student.id || index + 1),
+    gender: student.gender || inferGender(student),
+    dateOfBirth: student.dateOfBirth || `15/0${(index % 8) + 1}/20${12 + (index % 8)}`,
+    entryStatus,
+    aadhaarVerified: student.aadhaarVerified ?? student.attendance >= 85,
+    updatedOn: student.updatedOn || (student.riskLevel === 'High' ? '12/01/2026 08:49:56' : '16/09/2025 07:00:49'),
+    updatedBy,
+    updatedById,
+    isNewStudent: student.isNewStudent ?? index < 2,
+    incompleteCount: student.incompleteCount ?? (student.pendingDocs?.length || (entryStatus === 'Completed' ? 0 : 1)),
+    enrolmentProfile: {
+      schoolName: student.school,
+      program: student.programName,
+      currentGrade: classLabel,
+      section: sectionCode,
+      admissionType: student.fundsReceived > 0 ? 'Scholarship Renewal' : 'Fresh Entry',
+      rollNumber: student.studentId || `ROLL-${index + 1}`,
+      region: student.region,
+      guardianName: student.guardian?.name || 'Not assigned',
+      guardianPhone: student.guardian?.phone || '-',
+      ...(student.enrolmentProfile || {}),
+    },
+    facilityProfile: {
+      transport: student.expenses?.some((expense) => expense.category.toLowerCase().includes('bus')) ? 'Enabled' : 'Not Assigned',
+      books: student.expenses?.some((expense) => expense.category.toLowerCase().includes('book')) ? 'Issued' : 'Pending',
+      digitalAccess: student.expenses?.some((expense) => expense.category.toLowerCase().includes('internet') || expense.category.toLowerCase().includes('laptop')) ? 'Enabled' : 'Not Required',
+      scholarshipSupport: currency(student.scholarshipApproved || 0),
+      interventionLevel: student.riskLevel,
+      notes: student.pendingDocs?.length ? `Pending: ${student.pendingDocs.join(', ')}` : 'All core facilities mapped.',
+      ...(student.facilityProfile || {}),
+    },
+  };
+};
+
+const loadStoredStudents = () => {
+  try {
+    const stored = localStorage.getItem(studentStorageKey);
+    if (!stored) {
+      return students.map((student, index) => buildSchoolStudent(student, index));
+    }
+    const parsed = JSON.parse(stored);
+    return parsed.map((student, index) => buildSchoolStudent(student, index));
+  } catch {
+    return students.map((student, index) => buildSchoolStudent(student, index));
+  }
+};
+
+const persistStudents = (rows) => {
+  localStorage.setItem(studentStorageKey, JSON.stringify(rows));
+};
+
+const formatStudentDate = (value) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('en-GB');
+};
+
+const mapSchoolDataRow = (row, index = 0) => {
+  const generalProfile = row.general_profile || {};
+  const enrolmentProfile = row.enrolment_profile || {};
+  const facilityProfile = row.facility_profile || {};
+  const previewProfile = row.preview_profile || {};
+  const fallbackGrade = row.class_name?.match(/\d+/)?.[0];
+  const grade = fallbackGrade ? Number(fallbackGrade) : 10;
+
+  return buildSchoolStudent(
+    {
+      id: row.id,
+      pen: row.pen,
+      name: row.student_name,
+      grade,
+      classLabel: row.class_name || getClassLabel(grade),
+      sectionCode: row.section_name || 'A',
+      school: row.school_name || generalProfile.school_name || 'Not available',
+      gender: row.gender || 'Unknown',
+      dateOfBirth: formatStudentDate(row.date_of_birth),
+      entryStatus: row.entry_status || 'Draft',
+      aadhaarVerified: row.aadhaar_verified,
+      updatedOn: row.updated_on ? new Date(row.updated_on).toLocaleString('en-GB') : 'Not updated',
+      updatedBy: row.updated_by || 'ADMIN',
+      updatedById: row.updated_by_id || 'system',
+      isNewStudent: row.is_new_student,
+      programName: row.program_name || enrolmentProfile.future_goal || 'Not assigned',
+      scholarshipApproved: Number(row.approved_amount || 0),
+      fundsReceived: Number(row.received_amount || 0),
+      guardian: {
+        name: row.guardian_name || enrolmentProfile.guardianName || 'Not assigned',
+        relation: generalProfile.guardian_relation || '-',
+        phone: row.guardian_phone || generalProfile.parent_contact_no || '-',
+      },
+      academicYear: row.academic_year || '2025-26',
+      attendance: Number(previewProfile.attendance || 0),
+      average: Number(previewProfile.academic_average || 0),
+      academicStatus: previewProfile.academic_status || row.entry_status || 'Draft',
+      riskLevel: facilityProfile.interventionLevel || previewProfile.risk_level || 'Low',
+      pendingDocs: previewProfile.pending_docs || [],
+      enrolmentProfile: {
+        schoolName: row.school_name,
+        program: row.program_name,
+        currentGrade: row.class_name,
+        section: row.section_name,
+        admissionType: enrolmentProfile.admission_type || 'Fresh Entry',
+        rollNumber: enrolmentProfile.roll_number || row.pen,
+        region: enrolmentProfile.region || row.source_sheet || '-',
+        guardianName: row.guardian_name || 'Not assigned',
+        guardianPhone: row.guardian_phone || '-',
+        futureGoal: enrolmentProfile.future_goal || '-',
+        collegeName11th: enrolmentProfile.college_name_11th || '-',
+        enrolledIn11th: enrolmentProfile.enrolled_in_11th || '-',
+        coachingClassName: enrolmentProfile.coaching_class_name || '-',
+      },
+      facilityProfile: {
+        transport: facilityProfile.transport || 'Not Assigned',
+        books: facilityProfile.books || 'Pending',
+        digitalAccess: facilityProfile.digitalAccess || 'Not Required',
+        scholarshipSupport: currency(Number(row.approved_amount || 0)),
+        interventionLevel: facilityProfile.interventionLevel || 'Low',
+        notes: facilityProfile.notes || previewProfile.notes || 'No notes recorded.',
+        amount11th: facilityProfile.amount_11th || 0,
+        amount12th: facilityProfile.amount_12th || 0,
+        amount14th: facilityProfile.amount_14th || 0,
+        amount15th: facilityProfile.amount_15th || 0,
+      },
+      previewProfile: previewProfile,
+      marks: previewProfile.marks || [],
+      expenses: previewProfile.expenses || [],
+      attendanceHistory: previewProfile.attendance_history || [],
+      alerts: previewProfile.alerts || [],
+      region: enrolmentProfile.region || row.source_sheet || '-',
+    },
+    index
+  );
+};
+
+const fetchSchoolDataStudents = async () => {
+  const { data, error } = await supabase.from('school_data').select('*').order('student_name');
+  if (error) throw error;
+  return (data || []).map((row, index) => mapSchoolDataRow(row, index));
+};
 
 export const UserManagementPage = () => {
   const { addNotification } = useAuth();
@@ -155,35 +330,124 @@ export const UserManagementPage = () => {
 
 export const StudentManagementPage = () => {
   const { settings, addNotification } = useAuth();
+  const navigate = useNavigate();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [localStudents, setLocalStudents] = useState(students);
+  const [studentsData, setStudentsData] = useState([]);
+  const [loadingStudents, setLoadingStudents] = useState(true);
+  const [studentError, setStudentError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
-  const [gradeFilter, setGradeFilter] = useState('All Grades');
-  const [programFilter, setProgramFilter] = useState('All Programs');
-  const [riskFilter, setRiskFilter] = useState('All Risk');
+  const [gradeFilter, setGradeFilter] = useState('All Classes');
+  const [sectionFilter, setSectionFilter] = useState('All Sections');
   const [statusFilter, setStatusFilter] = useState('All Status');
-  const [formData, setFormData] = useState({ name: '', grade: '10', school: '', program: 'STEM Excellence Scholarship' });
+  const [expandedClass, setExpandedClass] = useState('');
+  const [formData, setFormData] = useState({
+    name: '',
+    grade: '10',
+    section: 'A',
+    school: '',
+    gender: 'Male',
+    program: 'STEM Excellence Scholarship',
+  });
   const [bulkAssignProgram, setBulkAssignProgram] = useState('STEM Excellence Scholarship');
   const [selectedStudents, setSelectedStudents] = useState([]);
-  const [importText, setImportText] = useState('');
 
-  const rows = localStudents
-    .filter((student) => {
-      const search = searchTerm.toLowerCase();
+  const loadStudents = async () => {
+    try {
+      setLoadingStudents(true);
+      setStudentError('');
+      const { data, error } = await supabase.from('school_data').select('*').order('student_name');
+      if (error) throw error;
+      const normalized = (data || []).map((row, index) => mapSchoolDataRow(row, index));
+      setStudentsData(normalized);
+      if (!expandedClass && normalized.length) {
+        setExpandedClass(normalized[0].classLabel);
+      }
+    } catch (error) {
+      setStudentError(error.message || 'Unable to load student data from Supabase.');
+    } finally {
+      setLoadingStudents(false);
+    }
+  };
+
+  useEffect(() => {
+    loadStudents();
+  }, []);
+
+  const classOptions = useMemo(
+    () => ['All Classes', ...new Set(studentsData.map((student) => student.classLabel))],
+    [studentsData]
+  );
+
+  const filteredStudents = useMemo(() => {
+    const search = searchTerm.trim().toLowerCase();
+    return studentsData.filter((student) => {
       const matchesSearch =
         !search ||
         student.name.toLowerCase().includes(search) ||
         student.school.toLowerCase().includes(search) ||
+        student.pen.toLowerCase().includes(search) ||
         student.guardian.name.toLowerCase().includes(search);
-      const matchesGrade = gradeFilter === 'All Grades' || `${student.grade}` === gradeFilter;
-      const matchesProgram = programFilter === 'All Programs' || student.programName === programFilter;
-      const matchesRisk = riskFilter === 'All Risk' || student.riskLevel === riskFilter;
-      const matchesStatus = statusFilter === 'All Status' || student.academicStatus === statusFilter;
-      return matchesSearch && matchesGrade && matchesProgram && matchesRisk && matchesStatus;
-    })
-    .map((student) => ({ ...student }));
+      const matchesClass = gradeFilter === 'All Classes' || student.classLabel === gradeFilter;
+      const matchesSection = sectionFilter === 'All Sections' || student.sectionCode === sectionFilter;
+      const matchesStatus = statusFilter === 'All Status' || student.entryStatus === statusFilter;
+      return matchesSearch && matchesClass && matchesSection && matchesStatus;
+    });
+  }, [gradeFilter, searchTerm, sectionFilter, statusFilter, studentsData]);
+
+  const classSummaryRows = useMemo(
+    () =>
+      [...new Set(filteredStudents.map((student) => student.classLabel))]
+        .map((classLabel) => {
+          const classStudents = filteredStudents.filter((student) => student.classLabel === classLabel);
+          return {
+            id: classLabel,
+            classLabel,
+            boys: classStudents.filter((student) => student.gender === 'Male').length,
+            girls: classStudents.filter((student) => student.gender === 'Female').length,
+            transgender: classStudents.filter((student) => student.gender === 'Transgender').length,
+            totalStudents: classStudents.length,
+            incompleteStudents: classStudents.filter((student) => student.entryStatus !== 'Completed').length,
+          };
+        })
+        .sort((a, b) => a.classLabel.localeCompare(b.classLabel, undefined, { numeric: true })),
+    [filteredStudents]
+  );
+
+  const activeClass = gradeFilter !== 'All Classes' ? gradeFilter : expandedClass || classSummaryRows[0]?.classLabel || '';
+
+  const sectionSummaryRows = useMemo(
+    () =>
+      schoolSections
+        .map((sectionCode) => {
+          const sectionStudents = filteredStudents.filter(
+            (student) => student.classLabel === activeClass && student.sectionCode === sectionCode
+          );
+          return {
+            id: `${activeClass}-${sectionCode}`,
+            classLabel: activeClass,
+            sectionAlias: `${sectionCode} (${activeClass?.replace('Grade ', 'Std ') || 'Section'})`,
+            sectionCode,
+            boys: sectionStudents.filter((student) => student.gender === 'Male').length,
+            girls: sectionStudents.filter((student) => student.gender === 'Female').length,
+            transgender: sectionStudents.filter((student) => student.gender === 'Transgender').length,
+            totalStudents: sectionStudents.length,
+            incompleteStudents: sectionStudents.filter((student) => student.entryStatus !== 'Completed').length,
+          };
+        })
+        .filter((section) => section.totalStudents > 0 || sectionFilter !== 'All Sections'),
+    [activeClass, filteredStudents, sectionFilter]
+  );
+
+  const activeSection = sectionFilter !== 'All Sections' ? sectionFilter : sectionSummaryRows[0]?.sectionCode || 'A';
+
+  const registerRows = useMemo(
+    () =>
+      filteredStudents.filter(
+        (student) => student.classLabel === activeClass && student.sectionCode === activeSection
+      ),
+    [activeClass, activeSection, filteredStudents]
+  );
 
   const handleCreateStudent = () => {
     if (!formData.name || !formData.school) {
@@ -191,31 +455,52 @@ export const StudentManagementPage = () => {
       return;
     }
 
-    const newStudent = {
-      id: `s${localStudents.length + 1}`,
-      name: formData.name,
-      grade: parseInt(formData.grade),
-      school: formData.school,
-      programName: formData.program,
-      attendance: 100,
-      average: 0,
-      academicStatus: 'Review',
-      riskLevel: 'Low',
-      fundsReceived: 0,
-      scholarshipApproved: settings.maxScholarship,
-      region: 'Bengaluru Urban',
-      guardian: { name: 'Not assigned', relation: '-', phone: '-' },
-      attendanceHistory: [],
-      marks: [],
-      expenses: [],
-      alerts: [],
-      pendingDocs: ['Onboarding...'],
+    const pen = `PEN-${Date.now()}`;
+    const className = getClassLabel(parseInt(formData.grade, 10));
+
+    const payload = {
+      academic_year: '2025-26',
+      source_sheet: className,
+      class_name: className,
+      section_name: formData.section,
+      pen,
+      student_name: formData.name,
+      gender: formData.gender,
+      date_of_birth: null,
+      school_name: formData.school,
+      guardian_name: null,
+      guardian_phone: null,
+      aadhaar_verified: false,
+      entry_status: 'Draft',
+      is_new_student: true,
+      updated_on: new Date().toISOString(),
+      updated_by: 'ADMIN',
+      updated_by_id: 'manual-create',
+      program_name: formData.program,
+      approved_amount: settings.maxScholarship,
+      received_amount: 0,
+      general_profile: {},
+      enrolment_profile: { section: formData.section },
+      facility_profile: {},
+      preview_profile: {},
     };
 
-    setLocalStudents([newStudent, ...localStudents]);
-    addNotification('Student added', `${formData.name} was added to ${formData.program}.`, 'Success');
-    setIsModalOpen(false);
-    setFormData({ name: '', grade: '10', school: '', program: 'STEM Excellence Scholarship' });
+    supabase
+      .from('school_data')
+      .insert([payload])
+      .then(({ error }) => {
+        if (error) throw error;
+        addNotification('Student added', `${formData.name} was added to ${className} - Section ${formData.section}.`, 'Success');
+        setIsModalOpen(false);
+        setFormData({ name: '', grade: '10', section: 'A', school: '', gender: 'Male', program: 'STEM Excellence Scholarship' });
+        setExpandedClass(className);
+        setGradeFilter(className);
+        setSectionFilter(formData.section);
+        loadStudents();
+      })
+      .catch((error) => {
+        setStudentError(error.message || 'Unable to create student.');
+      });
   };
 
   const toggleStudentSelection = (studentId) => {
@@ -229,189 +514,193 @@ export const StudentManagementPage = () => {
       alert('Select at least one student before bulk assigning.');
       return;
     }
-
-    setLocalStudents((current) =>
-      current.map((student) =>
-        selectedStudents.includes(student.id) ? { ...student, programName: bulkAssignProgram } : student
-      )
-    );
-    addNotification('Bulk assignment completed', `${selectedStudents.length} students were moved to ${bulkAssignProgram}.`, 'Success');
-    setBulkAssignOpen(false);
-    setSelectedStudents([]);
-  };
-
-  const handleImportStudents = () => {
-    const lines = importText
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    if (!lines.length) {
-      alert('Paste at least one student record to import.');
-      return;
-    }
-
-    const imported = lines.map((line, index) => {
-      const [name, grade = '10', school = 'Imported School', program = 'STEM Excellence Scholarship'] = line.split(',').map((part) => part.trim());
-      return {
-        id: `s${localStudents.length + index + 1}`,
-        name,
-        grade: parseInt(grade),
-        school,
-        programName: program,
-        attendance: 100,
-        average: 0,
-        academicStatus: 'Review',
-        riskLevel: 'Low',
-        fundsReceived: 0,
-        scholarshipApproved: settings.maxScholarship,
-        region: 'Bengaluru Urban',
-        guardian: { name: 'Imported guardian', relation: '-', phone: '-' },
-        attendanceHistory: [],
-        marks: [],
-        expenses: [],
-        alerts: [],
-        pendingDocs: ['Imported profile'],
-      };
-    });
-
-    setLocalStudents([...imported, ...localStudents]);
-    addNotification('Student import completed', `${imported.length} students were added to the monitoring list.`, 'Success');
-    setImportText('');
-    setImportOpen(false);
+    supabase
+      .from('school_data')
+      .update({ program_name: bulkAssignProgram, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'bulk-assign' })
+      .in('id', selectedStudents)
+      .then(({ error }) => {
+        if (error) throw error;
+        addNotification('Bulk assignment completed', `${selectedStudents.length} students were moved to ${bulkAssignProgram}.`, 'Success');
+        setBulkAssignOpen(false);
+        setSelectedStudents([]);
+        loadStudents();
+      })
+      .catch((error) => {
+        setStudentError(error.message || 'Unable to bulk assign students.');
+      });
   };
 
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Student Operations"
-        title="Student Management"
-        description="Search, segment, and drill into scholarship beneficiaries using risk-aware academic and utilization signals."
+        eyebrow="School Master"
+        title="Class And Student Register"
+        description="Live student register powered by Supabase `school_data`, organized in the same class -> section -> student workflow discussed earlier."
         actions={[
           <button key="add-student" onClick={() => setIsModalOpen(true)} className="rounded-2xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white">Add Student</button>,
           <button key="bulk-assign" onClick={() => setBulkAssignOpen(true)} className="rounded-2xl bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 ring-1 ring-slate-200">Bulk Assign Program</button>,
-          <button key="import" onClick={() => setImportOpen(true)} className="rounded-2xl bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 ring-1 ring-slate-200">Import Students</button>,
+          <button key="refresh" onClick={loadStudents} className="rounded-2xl bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 ring-1 ring-slate-200">Refresh</button>,
+        ]}
+      />
+      {studentError ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{studentError}</div> : null}
+      <KPIGrid
+        items={[
+          { label: 'Classes In Scope', value: classSummaryRows.length, helper: 'Visible after current filters' },
+          { label: 'Students Listed', value: filteredStudents.length, helper: 'Current register count' },
+          { label: 'Incomplete Profiles', value: filteredStudents.filter((student) => student.entryStatus !== 'Completed').length, helper: 'Need follow-up before completion' },
+          { label: 'Selected Students', value: selectedStudents.length, helper: 'Ready for bulk assignment' },
         ]}
       />
       <FilterBar
         filters={[
-          { label: 'Search', type: 'search', placeholder: 'Search student, school, or guardian', value: searchTerm, onChange: (e) => setSearchTerm(e.target.value) },
-          { label: 'Grade', options: ['All Grades', '6', '7', '8', '9', '10', '11', '12'], value: gradeFilter, onChange: (e) => setGradeFilter(e.target.value) },
-          { label: 'Program', options: ['All Programs', ...programs.map((program) => program.name)], value: programFilter, onChange: (e) => setProgramFilter(e.target.value) },
-          { label: 'Risk Level', options: ['All Risk', 'High', 'Medium', 'Low'], value: riskFilter, onChange: (e) => setRiskFilter(e.target.value) },
-          { label: 'Status', options: ['All Status', 'Strong', 'Stable', 'Needs Attention', 'Review'], value: statusFilter, onChange: (e) => setStatusFilter(e.target.value) },
+          { label: 'Search', type: 'search', placeholder: 'Search student, PEN, school, or guardian', value: searchTerm, onChange: (e) => setSearchTerm(e.target.value) },
+          { label: 'Class/Grade', options: classOptions, value: gradeFilter, onChange: (e) => { setGradeFilter(e.target.value); setExpandedClass(e.target.value === 'All Classes' ? classSummaryRows[0]?.classLabel || '' : e.target.value); } },
+          { label: 'Section', options: ['All Sections', ...schoolSections], value: sectionFilter, onChange: (e) => setSectionFilter(e.target.value) },
+          { label: 'Entry Status', options: ['All Status', 'Completed', 'In Progress', 'Draft'], value: statusFilter, onChange: (e) => setStatusFilter(e.target.value) },
         ]}
       />
-      
-      <Table
-        columns={[
-          {
-            key: 'select',
-            label: 'Select',
-            render: (_, row) => (
-              <input
-                type="checkbox"
-                checked={selectedStudents.includes(row.id)}
-                onChange={() => toggleStudentSelection(row.id)}
-                className="h-4 w-4 rounded border-slate-300"
-              />
-            ),
-          },
-          {
-            key: 'name',
-            label: 'Name',
-            render: (value, row) => (
-              <Link className="font-semibold text-brand-700 hover:text-brand-500" to={`/students/${row.id}`}>
-                {value}
-              </Link>
-            ),
-          },
-          { key: 'grade', label: 'Grade', render: (value) => `Grade ${value}` },
-          { key: 'attendance', label: 'Attendance', render: (value) => `${value}%` },
-          { key: 'academicStatus', label: 'Academic Status', render: (value) => <StatusBadge status={value} /> },
-          { key: 'fundsReceived', label: 'Funds Received', render: (value) => currency(value) },
-          { key: 'riskLevel', label: 'Risk', render: (value) => <StatusBadge status={value} /> },
-          {
-            key: 'action',
-            label: 'Profile',
-            render: (_, row) => (
-              <Link className="text-sm font-semibold text-brand-600" to={`/students/${row.id}`}>
-                View profile
-              </Link>
-            ),
-          },
-        ]}
-        rows={rows}
-      />
+      {loadingStudents ? <SectionCard><p className="text-sm text-slate-500">Loading students from Supabase...</p></SectionCard> : null}
+      {!loadingStudents ? (
+        <>
+          <SectionCard title="Class Summary" subtitle="Top-level class totals similar to the client reference screens.">
+            <div className="overflow-hidden rounded-[28px] border border-slate-200">
+              <div className="grid grid-cols-[1.4fr,0.7fr,0.7fr,0.9fr,1fr,1.1fr] bg-slate-900 px-5 py-4 text-sm font-bold text-white">
+                <span>Class/Grade</span>
+                <span>Boys</span>
+                <span>Girls</span>
+                <span>Transgender</span>
+                <span>Total Students</span>
+                <span>Incomplete Students</span>
+              </div>
+              <div className="divide-y divide-slate-200 bg-white">
+                {classSummaryRows.map((row) => (
+                  <button
+                    key={row.id}
+                    onClick={() => {
+                      setExpandedClass(row.classLabel);
+                      setGradeFilter(row.classLabel);
+                      setSectionFilter('All Sections');
+                    }}
+                    className={`grid w-full grid-cols-[1.4fr,0.7fr,0.7fr,0.9fr,1fr,1.1fr] px-5 py-5 text-left text-sm transition ${
+                      activeClass === row.classLabel ? 'bg-brand-100/70 text-slate-950' : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span className="font-semibold">{row.classLabel}</span>
+                    <span>{row.boys}</span>
+                    <span>{row.girls}</span>
+                    <span>{row.transgender}</span>
+                    <span>{row.totalStudents}</span>
+                    <span>{row.incompleteStudents}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </SectionCard>
 
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 backdrop-blur-sm p-4">
-          <div className="w-full max-w-2xl">
-            <ModalCard title="Add New Beneficiary" description="Complete the student profile to enroll them in a scholarship program.">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">FullName</p>
-                  <input
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none focus:ring-2 focus:ring-brand-500/20"
-                    placeholder="e.g. Rahul Kumar"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Current Grade</p>
-                  <select
-                    value={formData.grade}
-                    onChange={(e) => setFormData({ ...formData, grade: e.target.value })}
-                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3"
-                  >
-                    {['6', '7', '8', '9', '10', '11', '12'].map((g) => <option key={g} value={g}>Grade {g}</option>)}
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">School Name</p>
-                  <input
-                    value={formData.school}
-                    onChange={(e) => setFormData({ ...formData, school: e.target.value })}
-                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none focus:ring-2 focus:ring-brand-500/20"
-                    placeholder="e.g. GHS Sarjapur"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Assigned Program</p>
-                  <select
-                    value={formData.program}
-                    onChange={(e) => setFormData({ ...formData, program: e.target.value })}
-                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3"
-                  >
-                    {programs.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
-                  </select>
-                </div>
-                <div className="md:col-span-2 rounded-2xl bg-brand-50 p-4 border border-brand-100">
-                  <p className="text-xs font-bold text-brand-700">Governance Note</p>
-                  <p className="mt-1 text-[11px] text-brand-600">
-                    The approved scholarship amount will be automatically set to the global system limit of <b>{currency(settings.maxScholarship)}</b>. Change this limit in Admin Settings if required.
-                  </p>
-                </div>
-              </div>
-              <div className="mt-8 flex justify-end gap-3 border-t pt-6">
-                <button
-                  onClick={() => setIsModalOpen(false)}
-                  className="rounded-2xl px-5 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleCreateStudent}
-                  className="rounded-2xl bg-slate-950 px-6 py-2.5 text-sm font-semibold text-white shadow-soft"
-                >
-                  Create Student
-                </button>
-              </div>
-            </ModalCard>
+          <SectionCard title={`${activeClass || 'Class'} Sections`} subtitle="Section-wise split under the selected class.">
+            <Table
+              columns={[
+                { key: 'classLabel', label: 'Class/Grade' },
+                { key: 'sectionAlias', label: 'Section (Alias)' },
+                { key: 'boys', label: 'Boys' },
+                { key: 'girls', label: 'Girls' },
+                { key: 'transgender', label: 'Transgender' },
+                { key: 'totalStudents', label: 'Total Students' },
+                { key: 'incompleteStudents', label: 'Incomplete Students' },
+                {
+                  key: 'action',
+                  label: 'Action',
+                  render: (_, row) => (
+                    <button onClick={() => setSectionFilter(row.sectionCode)} className="rounded-xl border border-brand-300 px-3 py-1.5 text-sm font-semibold text-brand-700 transition hover:bg-brand-50">
+                      View/Manage
+                    </button>
+                  ),
+                },
+              ]}
+              rows={sectionSummaryRows}
+            />
+          </SectionCard>
+
+          <SectionCard title="Student Register" subtitle={`Showing ${activeClass || 'all classes'}${sectionFilter !== 'All Sections' ? ` - Section ${activeSection}` : ''}`}>
+            <Table
+              columns={[
+                {
+                  key: 'select',
+                  label: 'Select',
+                  render: (_, row) => (
+                    <input type="checkbox" checked={selectedStudents.includes(row.id)} onChange={() => toggleStudentSelection(row.id)} className="h-4 w-4 rounded border-slate-300" />
+                  ),
+                },
+                { key: 'classLabel', label: 'Class/Grade' },
+                { key: 'sectionCode', label: 'Section' },
+                {
+                  key: 'pen',
+                  label: 'PEN',
+                  render: (value, row) => (
+                    <div>
+                      <p className="font-semibold text-slate-900">{value}</p>
+                      {row.isNewStudent ? <span className="mt-1 inline-flex rounded-lg bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-700">New Student</span> : null}
+                    </div>
+                  ),
+                },
+                {
+                  key: 'name',
+                  label: "Student's Name",
+                  render: (value, row) => (
+                    <button onClick={() => navigate(`/students/${row.id}`)} className="text-left font-semibold text-brand-700 hover:text-brand-500">
+                      {value}
+                    </button>
+                  ),
+                },
+                { key: 'gender', label: 'Gender' },
+                { key: 'dateOfBirth', label: 'Date of Birth' },
+                { key: 'entryStatus', label: 'Entry Status', render: (value) => <StatusBadge status={value} /> },
+                {
+                  key: 'updatedOn',
+                  label: 'Last Updated (On/By)',
+                  render: (_, row) => (
+                    <div className="space-y-1">
+                      <div className="flex gap-1.5">
+                        {['GP', 'EP', 'FP'].map((item) => (
+                          <span key={item} className="rounded-lg bg-accent-500 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white">{item}</span>
+                        ))}
+                      </div>
+                      <p className="text-xs text-slate-500">Updated on {row.updatedOn}</p>
+                      <p className="text-xs italic text-slate-700">{row.updatedBy} by {row.updatedById}</p>
+                    </div>
+                  ),
+                },
+              ]}
+              rows={registerRows}
+            />
+          </SectionCard>
+        </>
+      ) : null}
+
+      <ModalShell open={isModalOpen}>
+        <ModalCard title="Add New Student" description="Create a class register entry directly in Supabase.">
+          <div className="grid gap-4 md:grid-cols-2">
+            <input value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3" placeholder="Student name" />
+            <select value={formData.grade} onChange={(e) => setFormData({ ...formData, grade: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+              {['6', '7', '8', '9', '10', '11', '12'].map((g) => <option key={g} value={g}>Grade {g}</option>)}
+            </select>
+            <select value={formData.section} onChange={(e) => setFormData({ ...formData, section: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+              {schoolSections.map((section) => <option key={section} value={section}>Section {section}</option>)}
+            </select>
+            <select value={formData.gender} onChange={(e) => setFormData({ ...formData, gender: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+              {['Male', 'Female', 'Transgender'].map((gender) => <option key={gender}>{gender}</option>)}
+            </select>
+            <input value={formData.school} onChange={(e) => setFormData({ ...formData, school: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3" placeholder="School name" />
+            <select value={formData.program} onChange={(e) => setFormData({ ...formData, program: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+              {programs.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+            </select>
           </div>
-        </div>
-        )}
+          <div className="mt-8 flex justify-end gap-3 border-t pt-6">
+            <button onClick={() => setIsModalOpen(false)} className="rounded-2xl px-5 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button onClick={handleCreateStudent} className="rounded-2xl bg-slate-950 px-6 py-2.5 text-sm font-semibold text-white shadow-soft">Create Student</button>
+          </div>
+        </ModalCard>
+      </ModalShell>
 
       <ModalShell open={bulkAssignOpen}>
         <ModalCard title="Bulk Assign Program" description="Select a program and update all checked students in one action.">
@@ -429,36 +718,6 @@ export const StudentManagementPage = () => {
           </div>
         </ModalCard>
       </ModalShell>
-
-      <ModalShell open={importOpen}>
-        <ModalCard title="Import Students" description="Paste CSV-style rows: name, grade, school, program">
-          <textarea
-            value={importText}
-            onChange={(e) => setImportText(e.target.value)}
-            className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3"
-            rows="8"
-            placeholder={`Riya Sharma, 9, GHS Sarjapur, STEM Excellence Scholarship\nManoj Das, 11, PU College Hubballi, Girls Future Tech`}
-          />
-          <div className="mt-6 flex justify-end gap-3 border-t pt-5">
-            <button onClick={() => setImportOpen(false)} className="rounded-2xl px-4 py-2.5 text-sm font-semibold text-slate-600">Cancel</button>
-            <button onClick={handleImportStudents} className="rounded-2xl bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white">Import Students</button>
-          </div>
-        </ModalCard>
-      </ModalShell>
-
-      <SectionCard title="Admin Operations Hub" subtitle="Operational shortcuts for the current session">
-        <div className="grid gap-3 md:grid-cols-2">
-          {[
-            ['Assign project manager', 'Distribute ownership across field teams.'],
-            ['Request missing documents', 'Trigger automated reminders.'],
-          ].map(([title, body]) => (
-            <div key={title} className="rounded-2xl border border-slate-100 bg-slate-50/50 p-4">
-              <p className="font-semibold text-slate-900">{title}</p>
-              <p className="mt-1 text-sm text-slate-500">{body}</p>
-            </div>
-          ))}
-        </div>
-      </SectionCard>
     </div>
   );
 };
@@ -467,7 +726,7 @@ const OverviewTab = ({ student }) => (
   <div className="grid gap-6 xl:grid-cols-[0.95fr,1.05fr]">
     <SectionCard title="Profile" subtitle="Student, school, and guardian snapshot">
       <div className="grid gap-4">
-        <MetricPill label="Student ID" value={student.id} />
+        <MetricPill label="Student Name" value={student.name} />
         <MetricPill label="School" value={student.school} />
         <MetricPill label="Guardian" value={`${student.guardian.name} (${student.guardian.relation})`} />
         <MetricPill label="Phone" value={student.guardian.phone} />
@@ -673,32 +932,223 @@ const AlertsTab = ({ student }) => (
   </div>
 );
 
+const StudentProfileDetailTable = ({ rows }) => (
+  <div className="overflow-hidden rounded-[24px] border border-slate-200 bg-white">
+    <table className="min-w-full text-left">
+      <tbody>
+        {rows.map((row, index) => (
+          <tr key={row.label} className="border-b border-slate-100 last:border-b-0">
+            <td className="w-14 px-4 py-4 text-sm font-bold text-slate-500">{index + 1}.</td>
+            <td className="w-[38%] px-4 py-4 text-sm font-semibold text-slate-700">{row.label}</td>
+            <td className="px-4 py-4 text-sm text-slate-900">{row.value}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
+
+const StudentProfileHeaderCard = ({ student }) => (
+  <SectionCard className="border-sky-200 bg-gradient-to-r from-sky-50 to-white shadow-soft">
+    <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-700">
+          <span><strong>Student Name</strong> - {student.name}</span>
+          <span className="text-slate-300">|</span>
+          <span><strong>Class</strong> - {student.classLabel}</span>
+          <span className="text-slate-300">|</span>
+          <span><strong>Section</strong> - {student.sectionCode}</span>
+          <span className="text-slate-300">|</span>
+          <span><strong>Academic Year</strong> - {student.academicYear}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-700">
+          <span><strong>Permanent Education Number</strong> - {student.pen}</span>
+          <span className={`rounded-full px-3 py-1 text-xs font-bold ${student.aadhaarVerified ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+            {student.aadhaarVerified ? 'Student Aadhaar Verified' : 'Aadhaar Verification Pending'}
+          </span>
+        </div>
+      </div>
+      <Link to="/students" className="inline-flex rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">
+        Back
+      </Link>
+    </div>
+  </SectionCard>
+);
+
+const StudentProfileSteps = ({ activeTab, tabs, onChange }) => (
+  <div className="grid gap-4 lg:grid-cols-4">
+    {tabs.map((tab, index) => (
+      <button
+        key={tab}
+        onClick={() => onChange(tab)}
+        className={`rounded-[24px] border px-5 py-5 text-left transition ${
+          activeTab === tab ? 'border-brand-600 bg-brand-50 text-brand-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+        }`}
+      >
+        <div className={`mb-3 flex h-10 w-10 items-center justify-center rounded-full border text-sm font-bold ${activeTab === tab ? 'border-brand-600 bg-brand-600 text-white' : 'border-slate-300 text-slate-600'}`}>
+          {index + 1}
+        </div>
+        <p className="text-lg font-semibold">{tab}</p>
+      </button>
+    ))}
+  </div>
+);
+
 export const StudentProfilePage = () => {
   const { studentId } = useParams();
-  const [activeTab, setActiveTab] = useState('Overview');
-  const student = students.find((item) => item.id === studentId) || students[0];
-  const tabs = ['Overview', 'Attendance', 'Academics', 'Scholarships', 'Expenses', 'Alerts'];
+  const [activeTab, setActiveTab] = useState('General Profile');
+  const [student, setStudent] = useState(null);
+  const [loadingStudent, setLoadingStudent] = useState(true);
+  const [studentError, setStudentError] = useState('');
+  const tabs = ['General Profile', 'Enrolment Profile', 'Facility Profile', 'Profile Preview'];
+
+  useEffect(() => {
+    const loadStudent = async () => {
+      try {
+        setLoadingStudent(true);
+        setStudentError('');
+        const { data, error } = await supabase.from('school_data').select('*').eq('id', studentId).single();
+        if (error) throw error;
+        setStudent(mapSchoolDataRow(data));
+      } catch (error) {
+        setStudentError(error.message || 'Unable to load student profile.');
+      } finally {
+        setLoadingStudent(false);
+      }
+    };
+
+    loadStudent();
+  }, [studentId]);
+
+  if (loadingStudent) {
+    return <SectionCard><p className="text-sm text-slate-500">Loading student profile...</p></SectionCard>;
+  }
+
+  if (studentError || !student) {
+    return <SectionCard><p className="text-sm text-rose-700">{studentError || 'Student not found.'}</p></SectionCard>;
+  }
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Student Detail" title={student.name} description={`Grade ${student.grade} - ${student.school} - ${student.programName}`} />
-      <StudentMonitoringHeader student={student} />
-      <Tabs tabs={tabs} active={activeTab} onChange={setActiveTab} />
-      {activeTab === 'Overview' && <OverviewTab student={student} />}
-      {activeTab === 'Attendance' && <AttendanceTab student={student} />}
-      {activeTab === 'Academics' && <AcademicsTab student={student} />}
-      {activeTab === 'Scholarships' && <ScholarshipsTab student={student} />}
-      {activeTab === 'Expenses' && <ExpensesTab student={student} />}
-      {activeTab === 'Alerts' && <AlertsTab student={student} />}
+      <PageHeader eyebrow="Student Detail" title={student.name} description="A school-style student profile built around the class register workflow." />
+      <StudentProfileHeaderCard student={student} />
+      <StudentProfileSteps activeTab={activeTab} tabs={tabs} onChange={setActiveTab} />
+      {activeTab === 'General Profile' && (
+        <SectionCard title="General Information Of Student" subtitle="Core identity details aligned to the school record view.">
+          <StudentProfileDetailTable
+            rows={[
+              { label: "Student's Name (as per school record / admission register)", value: student.name },
+              { label: 'Gender (as per school record / admission register)', value: student.gender },
+              { label: 'Date of Birth (DD/MM/YYYY)', value: student.dateOfBirth },
+              { label: 'Permanent Education Number', value: student.pen },
+              { label: 'School Name', value: student.school },
+              { label: 'Guardian Name', value: `${student.guardian.name} (${student.guardian.relation})` },
+              { label: 'Guardian Contact Number', value: student.guardian.phone },
+              { label: 'Current Entry Status', value: student.entryStatus },
+            ]}
+          />
+        </SectionCard>
+      )}
+      {activeTab === 'Enrolment Profile' && (
+        <SectionCard title="Enrolment Profile" subtitle="Class placement, school mapping, and operational enrolment fields.">
+          <StudentProfileDetailTable
+            rows={[
+              { label: 'Academic Year', value: student.academicYear },
+              { label: 'Class / Grade', value: student.classLabel },
+              { label: 'Section', value: student.sectionCode },
+              { label: 'Program Mapping', value: student.programName },
+              { label: 'Admission Type', value: student.enrolmentProfile.admissionType },
+              { label: 'Roll Number / Student Code', value: student.enrolmentProfile.rollNumber },
+              { label: 'Region', value: student.enrolmentProfile.region },
+              { label: 'Future Goal', value: student.enrolmentProfile.futureGoal || '-' },
+            ]}
+          />
+        </SectionCard>
+      )}
+      {activeTab === 'Facility Profile' && (
+        <div className="grid gap-6 xl:grid-cols-[0.95fr,1.05fr]">
+          <SectionCard title="Facility Profile" subtitle="Support services, scholarship details, and assistance visibility.">
+            <StudentProfileDetailTable
+              rows={[
+                { label: 'Transport Support', value: student.facilityProfile.transport },
+                { label: 'Books / Stationery', value: student.facilityProfile.books },
+                { label: 'Digital Access', value: student.facilityProfile.digitalAccess },
+                { label: 'Scholarship Support', value: student.facilityProfile.scholarshipSupport },
+                { label: 'Intervention Level', value: student.facilityProfile.interventionLevel },
+                { label: 'Facility Notes', value: student.facilityProfile.notes },
+              ]}
+            />
+          </SectionCard>
+          <SectionCard title="Financial Snapshot" subtitle="Simple scholarship summary pulled from the live row.">
+            <div className="grid gap-4 md:grid-cols-2">
+              <MetricPill label="Approved Amount" value={student.scholarshipApproved} format="currency" />
+              <MetricPill label="Received Amount" value={student.fundsReceived} format="currency" />
+              <MetricPill label="11th Amount" value={student.facilityProfile.amount11th} format="currency" />
+              <MetricPill label="12th Amount" value={student.facilityProfile.amount12th} format="currency" />
+            </div>
+          </SectionCard>
+        </div>
+      )}
+      {activeTab === 'Profile Preview' && (
+        <div className="space-y-6">
+          <div className="rounded-[24px] border border-rose-200 bg-rose-50 px-5 py-4 text-sm font-semibold text-rose-700">
+            Note: After verifying all the filled student data, users should proceed to complete the data entry and lock the profile.
+          </div>
+          <KPIGrid
+            items={[
+              { label: 'General Profile', value: 'Completed', helper: 'Identity details mapped', badge: 'Success' },
+              { label: 'Enrolment Profile', value: 'Completed', helper: 'Class, section, and school assigned', badge: 'Success' },
+              { label: 'Facility Profile', value: student.entryStatus === 'Completed' ? 'Completed' : 'Review', helper: 'Support mapping and services', badge: student.entryStatus === 'Completed' ? 'Success' : 'Warning' },
+              { label: 'Profile Status', value: student.entryStatus, helper: 'Current completion state' },
+            ]}
+          />
+          <SectionCard title="Profile Preview" subtitle="Combined view before final completion.">
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Completion Status</p>
+                <p className="mt-2 text-lg font-semibold text-slate-900">{student.entryStatus}</p>
+                <p className="mt-2 text-sm text-slate-500">Last updated on {student.updatedOn} by {student.updatedBy} ({student.updatedById}).</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Verification State</p>
+                <p className="mt-2 text-lg font-semibold text-slate-900">{student.aadhaarVerified ? 'Verified' : 'Pending'}</p>
+                <p className="mt-2 text-sm text-slate-500">Profile is ready for completion once all required school details are checked.</p>
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+      )}
     </div>
   );
 };
 
 export const AttendancePage = () => {
   const { addNotification } = useAuth();
-  const [register, setRegister] = useState(attendanceRegister);
+  const [register, setRegister] = useState([]);
   const [selectedDate, setSelectedDate] = useState('2026-04-04');
-  const [selectedClass, setSelectedClass] = useState('Grade 10');
+  const [selectedClass, setSelectedClass] = useState('All Classes');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    fetchSchoolDataStudents()
+      .then((students) => {
+        setRegister(
+          students.map((student) => ({
+            id: student.id,
+            studentName: student.name,
+            className: student.classLabel,
+            status:
+              student.previewProfile.attendance_status ||
+              (student.attendance >= 90 ? 'Present' : student.attendance >= 75 ? 'Late' : 'Absent'),
+            remarks: student.previewProfile.attendance_remark || (student.attendance ? `${student.attendance}% attendance score` : 'No attendance recorded'),
+            previewProfile: student.previewProfile || {},
+          }))
+        );
+      })
+      .catch((err) => setError(err.message || 'Unable to load attendance data.'))
+      .finally(() => setLoading(false));
+  }, []);
 
   const updateStatus = (studentName, nextStatus) => {
     setRegister((current) =>
@@ -719,11 +1169,31 @@ export const AttendancePage = () => {
     );
   };
 
-  const handleSave = () => {
-    addNotification('Attendance saved', `Attendance for ${selectedClass} on ${selectedDate} was updated successfully.`, 'Success');
+  const handleSave = async () => {
+    try {
+      const rowsToSave = register.filter((row) => selectedClass === 'All Classes' || row.className === selectedClass);
+      for (const row of rowsToSave) {
+        const nextPreview = {
+          ...row.previewProfile,
+          attendance_status: row.status,
+          attendance_remark: row.remarks,
+          attendance_date: selectedDate,
+        };
+        const { error } = await supabase
+          .from('school_data')
+          .update({ preview_profile: nextPreview, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'attendance-page' })
+          .eq('id', row.id);
+        if (error) throw error;
+      }
+      addNotification('Attendance saved', `Attendance for ${selectedClass} on ${selectedDate} was updated successfully.`, 'Success');
+    } catch (err) {
+      setError(err.message || 'Unable to save attendance.');
+    }
   };
 
-  const summary = register.reduce(
+  const filteredRegister = register.filter((row) => selectedClass === 'All Classes' || row.className === selectedClass);
+
+  const summary = filteredRegister.reduce(
     (acc, row) => {
       if (row.status === 'Present') acc.present += 1;
       if (row.status === 'Late') acc.late += 1;
@@ -736,12 +1206,13 @@ export const AttendancePage = () => {
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Attendance Workflow" title="Attendance" description="Fast teacher-friendly attendance marking with day-level controls and trend visibility." />
+      {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
       <div className="grid gap-6 xl:grid-cols-[1.15fr,0.85fr]">
-        <SectionCard title="Mark Attendance" subtitle="Mock save and update workflow">
+        <SectionCard title="Mark Attendance" subtitle="Live attendance updates backed by the school data table.">
           <div className="mb-4 grid gap-3 lg:grid-cols-[1fr,1fr,auto]">
             <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5" />
             <select value={selectedClass} onChange={(e) => setSelectedClass(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5">
-              {['Grade 8', 'Grade 9', 'Grade 10', 'Grade 11'].map((option) => <option key={option}>{option}</option>)}
+              {['All Classes', ...new Set(register.map((row) => row.className))].map((option) => <option key={option}>{option}</option>)}
             </select>
             <button onClick={handleSave} className="rounded-2xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white">Save Attendance</button>
           </div>
@@ -778,13 +1249,13 @@ export const AttendancePage = () => {
                 ),
               },
             ]}
-            rows={register}
+            rows={filteredRegister}
           />
         </SectionCard>
         <SectionCard title="Trend Summary" subtitle="Snapshot of recent class attendance health">
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={students.slice(0, 6).map((student) => ({ name: student.name.split(' ')[0], attendance: student.attendance }))}>
+              <LineChart data={filteredRegister.slice(0, 6).map((student) => ({ name: student.studentName.split(' ')[0], attendance: student.status === 'Present' ? 100 : student.status === 'Late' ? 80 : 60 }))}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="name" />
                 <YAxis domain={[60, 100]} />
@@ -801,43 +1272,96 @@ export const AttendancePage = () => {
 
 export const AcademicRecordsPage = () => {
   const { addNotification } = useAuth();
-  const [marksRows, setMarksRows] = useState(marksUploads);
+  const [marksRows, setMarksRows] = useState([]);
+  const [studentDirectory, setStudentDirectory] = useState([]);
+  const [error, setError] = useState('');
   const [entryForm, setEntryForm] = useState({
-    studentName: '',
+    studentId: '',
     subject: '',
     assessment: '',
     latest: '',
     teacherRemark: '',
-    className: 'Grade 10',
+    className: 'All Classes',
   });
 
-  const saveEntry = (mode) => {
-    if (!entryForm.studentName || !entryForm.subject || !entryForm.latest || !entryForm.assessment) {
+  useEffect(() => {
+    fetchSchoolDataStudents()
+      .then((students) => {
+        setStudentDirectory(students);
+        const rows = students.flatMap((student) =>
+          (student.marks?.length ? student.marks : [{ subject: 'Overall', latest: student.average || 0, term1: student.average || 0, term2: student.average || 0 }]).map((mark) => ({
+            id: `${student.id}-${mark.subject}`,
+            studentId: student.id,
+            studentName: student.name,
+            className: student.classLabel,
+            subject: mark.subject,
+            assessment: 'Imported',
+            latest: mark.latest,
+            status: 'Uploaded',
+            teacherRemark: mark.teacherRemark || 'Imported from profile data',
+          }))
+        );
+        setMarksRows(rows);
+      })
+      .catch((err) => setError(err.message || 'Unable to load academic records.'));
+  }, []);
+
+  const saveEntry = async (mode) => {
+    if (!entryForm.studentId || !entryForm.subject || !entryForm.latest || !entryForm.assessment) {
       alert('Please complete class, student, assessment, and score.');
       return;
     }
 
+    const student = studentDirectory.find((item) => item.id === entryForm.studentId);
     const newRow = {
       ...entryForm,
+      studentName: student?.name || '',
       latest: Number(entryForm.latest),
       status: mode === 'upload' ? 'Uploaded' : 'Draft',
     };
 
     setMarksRows([newRow, ...marksRows]);
-    addNotification(mode === 'upload' ? 'Marks uploaded' : 'Draft saved', `${entryForm.subject} marks for ${entryForm.studentName} were ${mode === 'upload' ? 'uploaded' : 'saved as draft'}.`, 'Success');
-    setEntryForm({ studentName: '', subject: '', assessment: '', latest: '', teacherRemark: '', className: 'Grade 10' });
+    try {
+      const existingMarks = student?.marks || [];
+      const nextMarks = [
+        ...existingMarks.filter((mark) => mark.subject !== entryForm.subject),
+        { subject: entryForm.subject, latest: Number(entryForm.latest), term1: Number(entryForm.latest), term2: Number(entryForm.latest), teacherRemark: entryForm.teacherRemark },
+      ];
+      const nextPreview = {
+        ...(student?.previewProfile || {}),
+        marks: nextMarks,
+        academic_average: Number(entryForm.latest),
+      };
+      const { error } = await supabase
+        .from('school_data')
+        .update({ preview_profile: nextPreview, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'academics-page' })
+        .eq('id', entryForm.studentId);
+      if (error) throw error;
+      addNotification(mode === 'upload' ? 'Marks uploaded' : 'Draft saved', `${entryForm.subject} marks for ${student?.name || 'student'} were ${mode === 'upload' ? 'uploaded' : 'saved as draft'}.`, 'Success');
+      setEntryForm({ studentId: '', subject: '', assessment: '', latest: '', teacherRemark: '', className: 'All Classes' });
+    } catch (err) {
+      setError(err.message || 'Unable to save academic record.');
+    }
   };
+
+  const filteredMarksRows = marksRows.filter((row) => entryForm.className === 'All Classes' || row.className === entryForm.className);
 
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Academic Records" title="Academics" description="Subject-wise marks capture, remarking, and trend review in one workspace." />
+      {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
       <div className="grid gap-6 xl:grid-cols-[1.05fr,0.95fr]">
-        <SectionCard title="Marks Entry" subtitle="Frontend-only form preview for teacher uploads">
+        <SectionCard title="Marks Entry" subtitle="Live marks capture and updates stored against each student profile.">
           <div className="grid gap-4 md:grid-cols-2">
             <select value={entryForm.className} onChange={(e) => setEntryForm({ ...entryForm, className: e.target.value })} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-              {['Grade 8', 'Grade 9', 'Grade 10', 'Grade 11'].map((grade) => <option key={grade}>{grade}</option>)}
+              {['All Classes', ...new Set(studentDirectory.map((student) => student.classLabel))].map((grade) => <option key={grade}>{grade}</option>)}
             </select>
-            <input value={entryForm.studentName} onChange={(e) => setEntryForm({ ...entryForm, studentName: e.target.value })} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" placeholder="Student name" />
+            <select value={entryForm.studentId} onChange={(e) => setEntryForm({ ...entryForm, studentId: e.target.value })} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <option value="">Select student</option>
+              {studentDirectory
+                .filter((student) => entryForm.className === 'All Classes' || student.classLabel === entryForm.className)
+                .map((student) => <option key={student.id} value={student.id}>{student.name}</option>)}
+            </select>
             <input value={entryForm.subject} onChange={(e) => setEntryForm({ ...entryForm, subject: e.target.value })} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" placeholder="Subject" />
             <input value={entryForm.assessment} onChange={(e) => setEntryForm({ ...entryForm, assessment: e.target.value })} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" placeholder="Assessment title" />
             <input value={entryForm.latest} onChange={(e) => setEntryForm({ ...entryForm, latest: e.target.value })} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" placeholder="Latest marks" />
@@ -862,7 +1386,7 @@ export const AcademicRecordsPage = () => {
               { key: 'status', label: 'Status', render: (value) => <StatusBadge status={value || 'Uploaded'} /> },
               { key: 'teacherRemark', label: 'Remark' },
             ]}
-            rows={marksRows}
+            rows={filteredMarksRows}
           />
         </SectionCard>
       </div>
@@ -1492,29 +2016,32 @@ export const AlertsPage = () => {
 
 export const ReportsPage = () => {
   const { addNotification } = useAuth();
+  const [liveStudents, setLiveStudents] = useState([]);
   const [dateFilter, setDateFilter] = useState('This Month');
   const [programFilter, setProgramFilter] = useState('All Programs');
   const [regionFilter, setRegionFilter] = useState('All Regions');
   const [studentFilter, setStudentFilter] = useState('All Students');
   const [funderFilter, setFunderFilter] = useState('All Funders');
 
-  const filteredStudents = students.filter((student) => {
+  useEffect(() => {
+    fetchSchoolDataStudents().then(setLiveStudents).catch(() => setLiveStudents([]));
+  }, []);
+
+  const filteredStudents = liveStudents.filter((student) => {
     const matchesProgram = programFilter === 'All Programs' || student.programName === programFilter;
     const matchesRegion = regionFilter === 'All Regions' || student.region === regionFilter;
     const matchesStudent = studentFilter === 'All Students' || student.name === studentFilter;
     return matchesProgram && matchesRegion && matchesStudent;
   });
 
-  const filteredReports = reportSnapshots.filter((report) => {
-    const matchesDate =
-      dateFilter === 'This Month' ? report.period.includes('2025') || report.period.includes('12 Months') :
-      dateFilter === 'Last Quarter' ? report.period.includes('Oct-Dec') || report.period.includes('12 Months') :
-      true;
-    const matchesProgram = programFilter === 'All Programs' || report.description.toLowerCase().includes(programFilter.split(' ')[0].toLowerCase());
-    const matchesRegion = regionFilter === 'All Regions' || report.description.includes(regionFilter) || regionFilter === 'Bengaluru Urban';
-    const matchesFunder = funderFilter === 'All Funders' || report.title.toLowerCase().includes('funder') || report.description.toLowerCase().includes(funderFilter.split(' ')[0].toLowerCase());
-    return matchesDate && matchesProgram && matchesRegion && matchesFunder;
-  });
+  const filteredReports = useMemo(
+    () => [
+      { id: 'r1', title: 'Class Register Summary', description: `Live rollup for ${filteredStudents.length} students currently in scope.`, period: dateFilter, status: 'Ready' },
+      { id: 'r2', title: 'Completion And Verification Pack', description: 'Tracks entry status and Aadhaar verification across current filters.', period: dateFilter, status: 'Ready' },
+      { id: 'r3', title: 'Scholarship Allocation Snapshot', description: 'Approved and received scholarship amounts from the live school data table.', period: dateFilter, status: 'Ready' },
+    ],
+    [dateFilter, filteredStudents.length]
+  );
 
   const handleExportReportPDF = (report) => {
     exportReportPackPDF({
@@ -1573,9 +2100,9 @@ export const ReportsPage = () => {
       <FilterBar
         filters={[
           { label: 'Date Range', options: ['This Month', 'Last Quarter', 'FY 2025-26'], value: dateFilter, onChange: (e) => setDateFilter(e.target.value) },
-          { label: 'Program', options: ['All Programs', ...programs.map((program) => program.name)], value: programFilter, onChange: (e) => setProgramFilter(e.target.value) },
-          { label: 'Region', options: ['All Regions', 'Bengaluru Urban', 'Mysuru', 'Tumakuru', 'Hubballi'], value: regionFilter, onChange: (e) => setRegionFilter(e.target.value) },
-          { label: 'Student', options: ['All Students', ...students.slice(0, 10).map((student) => student.name)], value: studentFilter, onChange: (e) => setStudentFilter(e.target.value) },
+          { label: 'Program', options: ['All Programs', ...new Set(liveStudents.map((student) => student.programName))], value: programFilter, onChange: (e) => setProgramFilter(e.target.value) },
+          { label: 'Region', options: ['All Regions', ...new Set(liveStudents.map((student) => student.region))], value: regionFilter, onChange: (e) => setRegionFilter(e.target.value) },
+          { label: 'Student', options: ['All Students', ...liveStudents.slice(0, 20).map((student) => student.name)], value: studentFilter, onChange: (e) => setStudentFilter(e.target.value) },
           { label: 'Funder', options: ['All Funders', 'Tata CSR Foundation', 'Infosys Social Impact', 'Wipro Education Trust'], value: funderFilter, onChange: (e) => setFunderFilter(e.target.value) },
         ]}
       />
@@ -1745,22 +2272,30 @@ export const MyScholarshipPage = () => {
   );
 };
 
-export const StudentsImpactPage = () => (
-  <div className="space-y-6">
-    <PageHeader eyebrow="Impact Lens" title="Students Impact" description="A funder-facing rollup of beneficiary outcomes and story-ready operational evidence." />
-    <div className="grid gap-6 lg:grid-cols-3">
-      {students.slice(0, 6).map((student) => (
-        <SectionCard key={student.id} title={student.name} subtitle={`${student.programName} - ${student.region}`}>
-          <div className="grid gap-3">
-            <MetricPill label="Attendance" value={student.attendance} format="percent" />
-            <MetricPill label="Average" value={student.average} />
-            <StatusBadge status={student.academicStatus} />
-          </div>
-        </SectionCard>
-      ))}
+export const StudentsImpactPage = () => {
+  const [liveStudents, setLiveStudents] = useState([]);
+
+  useEffect(() => {
+    fetchSchoolDataStudents().then(setLiveStudents).catch(() => setLiveStudents([]));
+  }, []);
+
+  return (
+    <div className="space-y-6">
+      <PageHeader eyebrow="Impact Lens" title="Students Impact" description="A funder-facing rollup of beneficiary outcomes and story-ready operational evidence." />
+      <div className="grid gap-6 lg:grid-cols-3">
+        {liveStudents.slice(0, 6).map((student) => (
+          <SectionCard key={student.id} title={student.name} subtitle={`${student.programName} - ${student.region}`}>
+            <div className="grid gap-3">
+              <MetricPill label="Attendance" value={student.attendance} format="percent" />
+              <MetricPill label="Average" value={student.average} />
+              <StatusBadge status={student.academicStatus} />
+            </div>
+          </SectionCard>
+        ))}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 export const FundUtilizationPage = () => {
   const summary = useMemo(() => programs.map((program) => ({ ...program, remaining: program.budget - program.allocated })), []);
@@ -1785,10 +2320,50 @@ export const FundUtilizationPage = () => {
 export const AdminSettingsPage = () => {
   const { settings, updateSettings } = useAuth();
   const [localSettings, setLocalSettings] = useState(settings);
+  const [importFile, setImportFile] = useState(null);
+  const [importPreview, setImportPreview] = useState(null);
+  const [importError, setImportError] = useState('');
+  const [isImporting, setIsImporting] = useState(false);
 
   const handleSave = () => {
     updateSettings(localSettings);
     alert('Global system settings updated successfully.');
+  };
+
+  const handleExcelSelection = async (event) => {
+    const file = event.target.files?.[0];
+    setImportFile(file || null);
+    setImportError('');
+    setImportPreview(null);
+
+    if (!file) return;
+
+    try {
+      const preview = await parseSchoolWorkbook(file);
+      setImportPreview(preview);
+    } catch (error) {
+      setImportError(error.message || 'Unable to parse workbook.');
+    }
+  };
+
+  const handleWorkbookImport = async () => {
+    if (!importPreview) {
+      setImportError('Select a valid workbook before importing.');
+      return;
+    }
+
+    try {
+      setIsImporting(true);
+      setImportError('');
+      const result = await importWorkbookToSupabase({ supabase, parsedWorkbook: importPreview });
+      alert(`Import completed. ${result.importedStudents} student rows and ${result.importedClasses} class/section groups were pushed to school_data.`);
+      setImportFile(null);
+      setImportPreview(null);
+    } catch (error) {
+      setImportError(error.message || 'Import failed while writing to Supabase.');
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   return (
@@ -1876,6 +2451,71 @@ export const AdminSettingsPage = () => {
                 />
               </div>
               <p className="text-xs text-slate-500">The total cumulative fund that can be approved for a single beneficiary per academic cycle.</p>
+            </div>
+          </div>
+        </SectionCard>
+
+        <SectionCard title="Excel Data Upload" subtitle="Admin upload for the same workbook format you shared, mapped into the single `school_data` table.">
+          <div className="space-y-5">
+            <div className="rounded-3xl border border-dashed border-brand-200 bg-brand-50/40 p-6">
+              <label className="block text-sm font-semibold text-slate-800">Select Excel Workbook</label>
+              <p className="mt-1 text-sm text-slate-500">Supported flow: upload the same scholarship workbook and push it into the single `school_data` table for admin-managed CRUD.</p>
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleExcelSelection}
+                className="mt-4 block w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700"
+              />
+              {importFile ? <p className="mt-3 text-sm text-slate-600">Selected file: <span className="font-semibold">{importFile.name}</span></p> : null}
+            </div>
+
+            {importError ? (
+              <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                <span>{importError}</span>
+              </div>
+            ) : null}
+
+            {importPreview ? (
+              <div className="grid gap-4 md:grid-cols-3">
+                <MetricPill label="Workbook" value={importPreview.workbookName} />
+                <MetricPill label="Detected Students" value={importPreview.totalRows} />
+                <MetricPill label="Detected Classes" value={importPreview.classes.length} />
+              </div>
+            ) : null}
+
+            {importPreview ? (
+              <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-900">Import Preview</p>
+                <p className="mt-1 text-sm text-slate-500">The importer reads the `All Batch`, `Batch - 2`, and `Batch - 3` sheets and stores detailed workbook fields inside the JSON columns on each `school_data` row.</p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {importPreview.classes.map((item) => (
+                    <span key={`${item.class_name}-${item.section_name}`} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
+                      {item.class_name} / Section {item.section_name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setImportFile(null);
+                  setImportPreview(null);
+                  setImportError('');
+                }}
+                className="rounded-2xl bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 ring-1 ring-slate-200"
+              >
+                Clear
+              </button>
+              <button
+                onClick={handleWorkbookImport}
+                disabled={!importPreview || isImporting}
+                className="rounded-2xl bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isImporting ? 'Importing...' : 'Upload To Supabase'}
+              </button>
             </div>
           </div>
         </SectionCard>
