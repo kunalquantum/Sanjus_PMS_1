@@ -499,3 +499,169 @@ export const exportReportPackPDF = ({
   );
   saveReportDocument(doc, filename || `${report.title.replace(/[^a-z0-9]+/gi, '_')}.pdf`);
 };
+
+const addKeyValueRows = (doc, rows = []) => {
+  rows.forEach((row) => {
+    doc.y = doc.ensureSpace(doc.y, 12);
+    doc.pdf.setDrawColor(226, 232, 240);
+    doc.pdf.line(doc.margin, doc.y - 1.5, doc.pageWidth - doc.margin, doc.y - 1.5);
+    doc.pdf.setFont('helvetica', 'bold');
+    doc.pdf.setFontSize(9);
+    doc.pdf.setTextColor(71, 85, 105);
+    doc.pdf.text(row.label, doc.margin, doc.y + 3);
+    doc.pdf.setFont('helvetica', 'normal');
+    doc.pdf.setTextColor(15, 23, 42);
+    const lines = doc.pdf.splitTextToSize(`${row.value}`, doc.pageWidth - doc.margin * 2 - 34);
+    doc.pdf.text(lines, doc.margin + 34, doc.y + 3);
+    doc.y += Math.max(8, lines.length * 4.5 + 2);
+  });
+
+  doc.y += 4;
+};
+
+const addWideTable = (doc, rows = [], columns = []) => {
+  if (!columns.length) return;
+
+  const usableWidth = doc.pageWidth - doc.margin * 2;
+  const totalWeight = columns.reduce((sum, column) => sum + (column.width || 1), 0);
+  const widths = columns.map((column) => (usableWidth * (column.width || 1)) / totalWeight);
+
+  let y = doc.ensureSpace(doc.y, 18);
+  doc.pdf.setFillColor(241, 245, 249);
+  doc.pdf.rect(doc.margin, y, usableWidth, 8, 'F');
+  doc.pdf.setFont('helvetica', 'bold');
+  doc.pdf.setFontSize(7);
+  doc.pdf.setTextColor(71, 85, 105);
+
+  let x = doc.margin;
+  columns.forEach((column, index) => {
+    doc.pdf.text(column.label, x + 2, y + 5.3);
+    x += widths[index];
+  });
+
+  y += 10;
+
+  rows.forEach((row) => {
+    y = doc.ensureSpace(y, 9);
+    doc.pdf.setDrawColor(226, 232, 240);
+    doc.pdf.line(doc.margin, y - 2, doc.pageWidth - doc.margin, y - 2);
+    doc.pdf.setFont('helvetica', 'normal');
+    doc.pdf.setFontSize(7);
+    doc.pdf.setTextColor(15, 23, 42);
+
+    let rowX = doc.margin;
+    columns.forEach((column, index) => {
+      const rawValue = `${row[column.key] ?? ''}`;
+      const maxChars = column.maxChars || 12;
+      const value = rawValue.length > maxChars ? `${rawValue.slice(0, maxChars - 2)}..` : rawValue;
+      doc.pdf.text(value, rowX + 2, y + 2.2);
+      rowX += widths[index];
+    });
+
+    y += 7;
+  });
+
+  doc.y = y + 4;
+};
+
+export const exportDashboardReportPDF = ({
+  batch = 'All Batch',
+  filters = {},
+  stats = {},
+  chartHighlights = {},
+  rows = [],
+  filename = 'SnehaAsha_Dashboard_Report.pdf',
+}) => {
+  const doc = createReportDocument('Sneha Asha Dashboard Report', `${batch} reporting export`);
+
+  addSectionHeading(
+    doc,
+    'Reporting Scope',
+    'This export captures the active dashboard selection as a print-friendly report for donor review, internal reporting, and batch-level follow-up.'
+  );
+
+  addKeyValueRows(doc, [
+    { label: 'Batch', value: batch },
+    { label: 'Student Search', value: filters.search || 'Not applied' },
+    { label: 'Gender Filter', value: filters.gender || 'All' },
+    { label: 'Age Filter', value: filters.age || 'All' },
+    { label: 'Year Of Passing SSC', value: filters.year || 'All' },
+    { label: 'Integrated Filter', value: filters.integrated || 'All' },
+    { label: 'Table Search', value: filters.tableSearch || 'Not applied' },
+  ]);
+
+  addSectionHeading(doc, 'Headline Statistics', 'Current totals from the active filtered dashboard view.');
+  addStatGrid(doc, [
+    { label: 'Transactions', value: stats.transactions ?? 0, helper: 'Filtered student rows' },
+    { label: 'Donors', value: stats.donors ?? 0, helper: 'Unique donor-linked records' },
+    { label: 'Donations', value: stats.donations ?? '-', helper: 'Combined support amount' },
+    { label: 'Average Gift', value: stats.avgGift ?? '-', helper: 'Average amount per record' },
+  ]);
+
+  addSectionHeading(doc, 'Analytics Highlights', 'A compact narrative summary of the charts currently shown on the dashboard.');
+  addKeyValueRows(doc, [
+    {
+      label: 'Top 11th Amount Student',
+      value: chartHighlights.topStudent || 'No matching student data',
+    },
+    {
+      label: 'Strongest School Cluster',
+      value: chartHighlights.topSchool || 'No school concentration detected',
+    },
+    {
+      label: 'Largest Age Segment',
+      value: chartHighlights.topAgeSegment || 'No age distribution available',
+    },
+    {
+      label: '11th Amount Trend',
+      value: chartHighlights.trendSummary || 'Trend data not available',
+    },
+  ]);
+
+  addSectionHeading(doc, 'Top Students By 11th College Amount', 'Highest-value beneficiary rows under the current filter scope.');
+  addListRows(
+    doc,
+    (chartHighlights.topStudents || []).length
+      ? chartHighlights.topStudents
+      : [{ name: 'No matching students', schoolName: '-', amount11thLabel: '-', totalAmountLabel: '-' }],
+    [
+      { key: 'name', label: 'Student' },
+      { key: 'schoolName', label: 'School' },
+      { key: 'amount11thLabel', label: '11th Amount' },
+      { key: 'totalAmountLabel', label: 'Total Amount' },
+    ]
+  );
+
+  addSectionHeading(doc, 'Transactions Register', 'Detailed rows prepared for follow-up, audit, and donor-ready circulation.');
+  addWideTable(
+    doc,
+    rows.length
+      ? rows
+      : [{
+          name: 'No matching rows',
+          gender: '-',
+          age: '-',
+          yearOfPassingSSC: '-',
+          amount11thLabel: '-',
+          amount12thLabel: '-',
+          coachingYear1Label: '-',
+          coachingYear2Label: '-',
+          amount14thLabel: '-',
+          totalAmountLabel: '-',
+        }],
+    [
+      { key: 'name', label: 'Student', width: 1.8, maxChars: 20 },
+      { key: 'gender', label: 'Gender', width: 0.8, maxChars: 8 },
+      { key: 'age', label: 'Age', width: 0.7, maxChars: 6 },
+      { key: 'yearOfPassingSSC', label: 'SSC Year', width: 1, maxChars: 10 },
+      { key: 'amount11thLabel', label: '11th', width: 1, maxChars: 11 },
+      { key: 'amount12thLabel', label: '12th', width: 1, maxChars: 11 },
+      { key: 'coachingYear1Label', label: 'Coach 1', width: 1, maxChars: 11 },
+      { key: 'coachingYear2Label', label: 'Coach 2', width: 1, maxChars: 11 },
+      { key: 'amount14thLabel', label: '14th', width: 1, maxChars: 11 },
+      { key: 'totalAmountLabel', label: 'Total', width: 1.1, maxChars: 12 },
+    ]
+  );
+
+  saveReportDocument(doc, filename);
+};
