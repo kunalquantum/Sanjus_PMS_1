@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, AlertTriangle } from 'lucide-react';
 import {
   FileUploadBox,
   FilterBar,
@@ -40,15 +40,101 @@ import { useAuth } from '../../context/AuthContext';
 import { exportReportPackPDF, exportRowsToCSV } from '../../utils/exportUtils';
 import { supabase } from '../../lib/supabaseClient';
 import { importWorkbookToSupabase, parseSchoolWorkbook } from '../../utils/schoolImport';
+import { sendDbAuditLog } from '../../utils/dbAudit';
 
 const ModalShell = ({ open, children }) =>
   open ? (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-3xl">{children}</div>
+      <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto">{children}</div>
     </div>
   ) : null;
 
+const playWriteAlertTone = () => {
+  if (typeof window === 'undefined') return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  const context = new AudioContextClass();
+  const notes = [
+    { frequency: 523.25, duration: 0.08 },
+    { frequency: 659.25, duration: 0.12 },
+  ];
+
+  let cursor = context.currentTime;
+  notes.forEach((note) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.value = note.frequency;
+    gain.gain.setValueAtTime(0.0001, cursor);
+    gain.gain.exponentialRampToValueAtTime(0.03, cursor + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, cursor + note.duration);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(cursor);
+    oscillator.stop(cursor + note.duration);
+    cursor += note.duration + 0.03;
+  });
+};
+
+const WriteConfirmModal = ({
+  open,
+  title,
+  description,
+  impactLines = [],
+  confirmationLabel = 'Confirm write',
+  acknowledge,
+  onAcknowledge,
+  onCancel,
+  onConfirm,
+  busy = false,
+}) => (
+  <ModalShell open={open}>
+    <ModalCard title={title} description={description}>
+      <div className="space-y-5">
+        <div className="rounded-[24px] border border-amber-200 bg-amber-50/90 p-5 dark:border-amber-500/25 dark:bg-amber-500/10">
+          <div className="flex items-start gap-4">
+            <div className="rounded-2xl bg-amber-100 p-3 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">This action writes to the live database.</p>
+              <div className="space-y-1 text-sm text-slate-600 dark:text-white/70">
+                {impactLines.map((line) => (
+                  <p key={line}>{line}</p>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-700 dark:border-white/10 dark:bg-white/[0.03] dark:text-white/75">
+          <input type="checkbox" checked={acknowledge} onChange={(e) => onAcknowledge(e.target.checked)} className="mt-1 h-4 w-4 rounded border-slate-300" />
+          <span>I understand this change will update live records and should be logged as an operational action.</span>
+        </label>
+
+        <div className="flex justify-end gap-3 border-t border-slate-200 pt-5 dark:border-white/10">
+          <button onClick={onCancel} className="rounded-2xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 dark:text-white/70 dark:hover:bg-white/5">
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!acknowledge || busy}
+            className="rounded-2xl bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? 'Applying...' : confirmationLabel}
+          </button>
+        </div>
+      </div>
+    </ModalCard>
+  </ModalShell>
+);
+
 const studentStorageKey = 'school_master_students';
+
+const modalFieldClass =
+  'w-full appearance-none rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-brand-400 focus:ring-2 focus:ring-brand-100 dark:border-white/10 dark:bg-[#2a211c] dark:text-white dark:placeholder:text-white/35 dark:focus:border-brand-400 dark:focus:ring-brand-500/20';
+
+const modalLabelClass = 'mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-500 dark:text-white/55';
 
 const schoolSections = ['A', 'B', 'C'];
 
@@ -343,14 +429,45 @@ export const StudentManagementPage = () => {
   const [expandedClass, setExpandedClass] = useState('');
   const [formData, setFormData] = useState({
     name: '',
-    grade: '10',
+    academicYear: '2025-26',
+    grade: 'Nursery/PP3',
     section: 'A',
+    pen: '',
+    dateOfBirth: '',
     school: '',
     gender: 'Male',
+    guardianName: '',
+    guardianPhone: '',
     program: 'STEM Excellence Scholarship',
+    approvedAmount: '',
+    receivedAmount: '0',
+    entryStatus: 'Draft',
   });
   const [bulkAssignProgram, setBulkAssignProgram] = useState('STEM Excellence Scholarship');
   const [selectedStudents, setSelectedStudents] = useState([]);
+  const [confirmState, setConfirmState] = useState({ open: false, title: '', description: '', impactLines: [], confirmationLabel: 'Confirm write', acknowledge: false, busy: false, onConfirm: null });
+
+  useEffect(() => {
+    if (confirmState.open) {
+      playWriteAlertTone();
+    }
+  }, [confirmState.open]);
+
+  const openWriteConfirmation = ({ title, description, impactLines, confirmationLabel, onConfirm }) => {
+    setConfirmState({
+      open: true,
+      title,
+      description,
+      impactLines,
+      confirmationLabel: confirmationLabel || 'Confirm write',
+      acknowledge: false,
+      busy: false,
+      onConfirm,
+    });
+  };
+
+  const closeWriteConfirmation = () =>
+    setConfirmState({ open: false, title: '', description: '', impactLines: [], confirmationLabel: 'Confirm write', acknowledge: false, busy: false, onConfirm: null });
 
   const loadStudents = async () => {
     try {
@@ -449,58 +566,114 @@ export const StudentManagementPage = () => {
     [activeClass, activeSection, filteredStudents]
   );
 
-  const handleCreateStudent = () => {
-    if (!formData.name || !formData.school) {
-      alert('Please fill in the student name and school.');
+  const resetStudentForm = () =>
+    setFormData({
+      name: '',
+      academicYear: '2025-26',
+      grade: 'Nursery/PP3',
+      section: 'A',
+      pen: '',
+      dateOfBirth: '',
+      school: '',
+      gender: 'Male',
+      guardianName: '',
+      guardianPhone: '',
+      program: 'STEM Excellence Scholarship',
+      approvedAmount: '',
+      receivedAmount: '0',
+      entryStatus: 'Draft',
+    });
+
+  const handleCreateStudent = async () => {
+    if (!formData.name.trim() || !formData.school.trim() || !formData.pen.trim()) {
+      alert('Please fill in student name, PEN, and school.');
       return;
     }
 
-    const pen = `PEN-${Date.now()}`;
-    const className = getClassLabel(parseInt(formData.grade, 10));
-
+    const className = formData.grade;
+    const approvedAmount = Number(formData.approvedAmount || settings.maxScholarship || 0);
+    const receivedAmount = Number(formData.receivedAmount || 0);
     const payload = {
-      academic_year: '2025-26',
-      source_sheet: className,
+      academic_year: formData.academicYear,
+      source_sheet: 'Manual Entry',
       class_name: className,
       section_name: formData.section,
-      pen,
-      student_name: formData.name,
+      pen: formData.pen.trim(),
+      student_name: formData.name.trim(),
       gender: formData.gender,
-      date_of_birth: null,
-      school_name: formData.school,
-      guardian_name: null,
-      guardian_phone: null,
+      date_of_birth: formData.dateOfBirth || null,
+      school_name: formData.school.trim(),
+      guardian_name: formData.guardianName.trim() || null,
+      guardian_phone: formData.guardianPhone.trim() || null,
       aadhaar_verified: false,
-      entry_status: 'Draft',
+      entry_status: formData.entryStatus,
       is_new_student: true,
       updated_on: new Date().toISOString(),
       updated_by: 'ADMIN',
       updated_by_id: 'manual-create',
       program_name: formData.program,
-      approved_amount: settings.maxScholarship,
-      received_amount: 0,
-      general_profile: {},
-      enrolment_profile: { section: formData.section },
-      facility_profile: {},
-      preview_profile: {},
+      approved_amount: approvedAmount,
+      received_amount: receivedAmount,
+      general_profile: {
+        guardian_relation: 'Parent',
+        parent_contact_no: formData.guardianPhone.trim() || null,
+      },
+      enrolment_profile: {
+        section: formData.section,
+        roll_number: formData.pen.trim(),
+        school_name: formData.school.trim(),
+        guardianName: formData.guardianName.trim() || null,
+        guardianPhone: formData.guardianPhone.trim() || null,
+        region: 'Manual Entry',
+      },
+      facility_profile: {
+        scholarshipSupport: currency(approvedAmount),
+        interventionLevel: formData.entryStatus === 'Completed' ? 'Low' : 'Moderate',
+      },
+      preview_profile: {
+        attendance: 0,
+        academic_average: 0,
+        academic_status: formData.entryStatus,
+        pending_docs: formData.entryStatus === 'Completed' ? [] : ['Complete student profile'],
+      },
     };
 
-    supabase
-      .from('school_data')
-      .insert([payload])
-      .then(({ error }) => {
-        if (error) throw error;
-        addNotification('Student added', `${formData.name} was added to ${className} - Section ${formData.section}.`, 'Success');
-        setIsModalOpen(false);
-        setFormData({ name: '', grade: '10', section: 'A', school: '', gender: 'Male', program: 'STEM Excellence Scholarship' });
-        setExpandedClass(className);
-        setGradeFilter(className);
-        setSectionFilter(formData.section);
-        loadStudents();
-      })
-      .catch((error) => {
-        setStudentError(error.message || 'Unable to create student.');
-      });
+    openWriteConfirmation({
+      title: 'Confirm Student Creation',
+      description: 'Review the write before adding a new live student record.',
+      impactLines: [
+        `Student: ${payload.student_name}`,
+        `Class: ${className} / Section ${formData.section}`,
+        `PEN: ${payload.pen}`,
+      ],
+      confirmationLabel: 'Create student',
+      onConfirm: async () => {
+        try {
+          setConfirmState((current) => ({ ...current, busy: true }));
+          setStudentError('');
+
+          const { error } = await supabase.from('school_data').insert([payload]);
+          if (error) throw error;
+          await sendDbAuditLog({
+            action: 'INSERT',
+            entity: 'school_data',
+            summary: `Student created: ${payload.student_name}`,
+            payload: { pen: payload.pen, class_name: payload.class_name, section_name: payload.section_name },
+          });
+          addNotification('Student added', `${formData.name.trim()} was added to ${className} - Section ${formData.section}.`, 'Success');
+          closeWriteConfirmation();
+          setIsModalOpen(false);
+          resetStudentForm();
+          setExpandedClass(className);
+          setGradeFilter(className);
+          setSectionFilter(formData.section);
+          await loadStudents();
+        } catch (error) {
+          setStudentError(error.message || 'Unable to create student.');
+          setConfirmState((current) => ({ ...current, busy: false }));
+        }
+      },
+    });
   };
 
   const toggleStudentSelection = (studentId) => {
@@ -514,24 +687,56 @@ export const StudentManagementPage = () => {
       alert('Select at least one student before bulk assigning.');
       return;
     }
-    supabase
-      .from('school_data')
-      .update({ program_name: bulkAssignProgram, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'bulk-assign' })
-      .in('id', selectedStudents)
-      .then(({ error }) => {
-        if (error) throw error;
-        addNotification('Bulk assignment completed', `${selectedStudents.length} students were moved to ${bulkAssignProgram}.`, 'Success');
-        setBulkAssignOpen(false);
-        setSelectedStudents([]);
-        loadStudents();
-      })
-      .catch((error) => {
-        setStudentError(error.message || 'Unable to bulk assign students.');
-      });
+
+    openWriteConfirmation({
+      title: 'Confirm Bulk Program Assignment',
+      description: 'This will update the selected live student records.',
+      impactLines: [
+        `Students selected: ${selectedStudents.length}`,
+        `New program: ${bulkAssignProgram}`,
+      ],
+      confirmationLabel: 'Apply assignment',
+      onConfirm: async () => {
+        try {
+          setConfirmState((current) => ({ ...current, busy: true }));
+          const { error } = await supabase
+            .from('school_data')
+            .update({ program_name: bulkAssignProgram, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'bulk-assign' })
+            .in('id', selectedStudents);
+          if (error) throw error;
+          await sendDbAuditLog({
+            action: 'UPDATE',
+            entity: 'school_data',
+            summary: `Bulk program assignment applied to ${selectedStudents.length} students`,
+            payload: { student_ids: selectedStudents, program_name: bulkAssignProgram },
+          });
+          addNotification('Bulk assignment completed', `${selectedStudents.length} students were moved to ${bulkAssignProgram}.`, 'Success');
+          closeWriteConfirmation();
+          setBulkAssignOpen(false);
+          setSelectedStudents([]);
+          await loadStudents();
+        } catch (error) {
+          setStudentError(error.message || 'Unable to bulk assign students.');
+          setConfirmState((current) => ({ ...current, busy: false }));
+        }
+      },
+    });
   };
 
   return (
     <div className="space-y-6">
+      <WriteConfirmModal
+        open={confirmState.open}
+        title={confirmState.title}
+        description={confirmState.description}
+        impactLines={confirmState.impactLines}
+        confirmationLabel={confirmState.confirmationLabel}
+        acknowledge={confirmState.acknowledge}
+        onAcknowledge={(value) => setConfirmState((current) => ({ ...current, acknowledge: value }))}
+        onCancel={closeWriteConfirmation}
+        onConfirm={() => confirmState.onConfirm?.()}
+        busy={confirmState.busy}
+      />
       <PageHeader
         eyebrow="School Master"
         title="Class And Student Register"
@@ -678,25 +883,82 @@ export const StudentManagementPage = () => {
       ) : null}
 
       <ModalShell open={isModalOpen}>
-        <ModalCard title="Add New Student" description="Create a class register entry directly in Supabase.">
+        <ModalCard title="Add New Student" description="Create a live student record in Supabase with the same school-style fields used in the register.">
           <div className="grid gap-4 md:grid-cols-2">
-            <input value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3" placeholder="Student name" />
-            <select value={formData.grade} onChange={(e) => setFormData({ ...formData, grade: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-              {['6', '7', '8', '9', '10', '11', '12'].map((g) => <option key={g} value={g}>Grade {g}</option>)}
-            </select>
-            <select value={formData.section} onChange={(e) => setFormData({ ...formData, section: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-              {schoolSections.map((section) => <option key={section} value={section}>Section {section}</option>)}
-            </select>
-            <select value={formData.gender} onChange={(e) => setFormData({ ...formData, gender: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-              {['Male', 'Female', 'Transgender'].map((gender) => <option key={gender}>{gender}</option>)}
-            </select>
-            <input value={formData.school} onChange={(e) => setFormData({ ...formData, school: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3" placeholder="School name" />
-            <select value={formData.program} onChange={(e) => setFormData({ ...formData, program: e.target.value })} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-              {programs.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
-            </select>
+            <label>
+              <span className={modalLabelClass}>Student Name</span>
+              <input value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className={modalFieldClass} placeholder="Student name" />
+            </label>
+            <label>
+              <span className={modalLabelClass}>PEN</span>
+              <input value={formData.pen} onChange={(e) => setFormData({ ...formData, pen: e.target.value })} className={modalFieldClass} placeholder="Permanent Education Number" />
+            </label>
+            <label>
+              <span className={modalLabelClass}>Academic Year</span>
+              <select value={formData.academicYear} onChange={(e) => setFormData({ ...formData, academicYear: e.target.value })} className={modalFieldClass}>
+                {['2025-26', '2026-27', '2027-28'].map((year) => <option key={year} value={year} className="bg-white text-slate-900 dark:bg-[#221b17] dark:text-white">{year}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className={modalLabelClass}>Class / Grade</span>
+              <select value={formData.grade} onChange={(e) => setFormData({ ...formData, grade: e.target.value })} className={modalFieldClass}>
+                {['Nursery/PP3', 'Grade 1', 'Grade 2', 'Grade 3', 'Grade 4', 'Grade 5', 'Grade 6', 'Grade 7', 'Grade 8', 'Grade 9', 'Grade 10', 'Grade 11', 'Grade 12'].map((grade) => <option key={grade} value={grade} className="bg-white text-slate-900 dark:bg-[#221b17] dark:text-white">{grade}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className={modalLabelClass}>Section</span>
+              <select value={formData.section} onChange={(e) => setFormData({ ...formData, section: e.target.value })} className={modalFieldClass}>
+                {schoolSections.map((section) => <option key={section} value={section} className="bg-white text-slate-900 dark:bg-[#221b17] dark:text-white">Section {section}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className={modalLabelClass}>Gender</span>
+              <select value={formData.gender} onChange={(e) => setFormData({ ...formData, gender: e.target.value })} className={modalFieldClass}>
+                {['Male', 'Female', 'Transgender'].map((gender) => <option key={gender} className="bg-white text-slate-900 dark:bg-[#221b17] dark:text-white">{gender}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className={modalLabelClass}>Date Of Birth</span>
+              <input type="date" value={formData.dateOfBirth} onChange={(e) => setFormData({ ...formData, dateOfBirth: e.target.value })} className={modalFieldClass} />
+            </label>
+            <label>
+              <span className={modalLabelClass}>School Name</span>
+              <input value={formData.school} onChange={(e) => setFormData({ ...formData, school: e.target.value })} className={modalFieldClass} placeholder="School name" />
+            </label>
+            <label>
+              <span className={modalLabelClass}>Guardian Name</span>
+              <input value={formData.guardianName} onChange={(e) => setFormData({ ...formData, guardianName: e.target.value })} className={modalFieldClass} placeholder="Guardian name" />
+            </label>
+            <label>
+              <span className={modalLabelClass}>Guardian Phone</span>
+              <input value={formData.guardianPhone} onChange={(e) => setFormData({ ...formData, guardianPhone: e.target.value })} className={modalFieldClass} placeholder="Guardian phone" />
+            </label>
+            <label>
+              <span className={modalLabelClass}>Program</span>
+              <select value={formData.program} onChange={(e) => setFormData({ ...formData, program: e.target.value })} className={modalFieldClass}>
+                {programs.map((p) => <option key={p.id} value={p.name} className="bg-white text-slate-900 dark:bg-[#221b17] dark:text-white">{p.name}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className={modalLabelClass}>Approved Amount</span>
+              <input value={formData.approvedAmount} onChange={(e) => setFormData({ ...formData, approvedAmount: e.target.value })} className={modalFieldClass} placeholder={`Default ${settings.maxScholarship}`} />
+            </label>
+            <label>
+              <span className={modalLabelClass}>Received Amount</span>
+              <input value={formData.receivedAmount} onChange={(e) => setFormData({ ...formData, receivedAmount: e.target.value })} className={modalFieldClass} placeholder="Received amount" />
+            </label>
+            <label>
+              <span className={modalLabelClass}>Entry Status</span>
+              <select value={formData.entryStatus} onChange={(e) => setFormData({ ...formData, entryStatus: e.target.value })} className={modalFieldClass}>
+                {['Draft', 'In Progress', 'Completed'].map((status) => <option key={status} value={status} className="bg-white text-slate-900 dark:bg-[#221b17] dark:text-white">{status}</option>)}
+              </select>
+            </label>
           </div>
-          <div className="mt-8 flex justify-end gap-3 border-t pt-6">
-            <button onClick={() => setIsModalOpen(false)} className="rounded-2xl px-5 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button>
+          <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:bg-white/5 dark:text-white/65">
+            This form writes directly to <code>public.school_data</code> and refreshes the class register after insert.
+          </div>
+          <div className="mt-8 flex justify-end gap-3 border-t border-slate-200 pt-6 dark:border-white/10">
+            <button onClick={() => { setIsModalOpen(false); resetStudentForm(); }} className="rounded-2xl px-5 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 dark:text-white/70 dark:hover:bg-white/5">Cancel</button>
             <button onClick={handleCreateStudent} className="rounded-2xl bg-slate-950 px-6 py-2.5 text-sm font-semibold text-white shadow-soft">Create Student</button>
           </div>
         </ModalCard>
@@ -1129,6 +1391,11 @@ export const AttendancePage = () => {
   const [selectedClass, setSelectedClass] = useState('All Classes');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [confirmState, setConfirmState] = useState({ open: false, acknowledge: false, busy: false });
+
+  useEffect(() => {
+    if (confirmState.open) playWriteAlertTone();
+  }, [confirmState.open]);
 
   useEffect(() => {
     fetchSchoolDataStudents()
@@ -1170,25 +1437,45 @@ export const AttendancePage = () => {
   };
 
   const handleSave = async () => {
-    try {
-      const rowsToSave = register.filter((row) => selectedClass === 'All Classes' || row.className === selectedClass);
-      for (const row of rowsToSave) {
-        const nextPreview = {
-          ...row.previewProfile,
-          attendance_status: row.status,
-          attendance_remark: row.remarks,
-          attendance_date: selectedDate,
-        };
-        const { error } = await supabase
-          .from('school_data')
-          .update({ preview_profile: nextPreview, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'attendance-page' })
-          .eq('id', row.id);
-        if (error) throw error;
-      }
-      addNotification('Attendance saved', `Attendance for ${selectedClass} on ${selectedDate} was updated successfully.`, 'Success');
-    } catch (err) {
-      setError(err.message || 'Unable to save attendance.');
-    }
+    const rowsToSave = register.filter((row) => selectedClass === 'All Classes' || row.className === selectedClass);
+    setConfirmState({
+      open: true,
+      acknowledge: false,
+      busy: false,
+      title: 'Confirm Attendance Update',
+      description: 'This will update live attendance records in the database.',
+      impactLines: [`Date: ${selectedDate}`, `Rows to update: ${rowsToSave.length}`, `Scope: ${selectedClass}`],
+      confirmationLabel: 'Save attendance',
+      onConfirm: async () => {
+        try {
+          setConfirmState((current) => ({ ...current, busy: true }));
+          for (const row of rowsToSave) {
+            const nextPreview = {
+              ...row.previewProfile,
+              attendance_status: row.status,
+              attendance_remark: row.remarks,
+              attendance_date: selectedDate,
+            };
+            const { error } = await supabase
+              .from('school_data')
+              .update({ preview_profile: nextPreview, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'attendance-page' })
+              .eq('id', row.id);
+            if (error) throw error;
+          }
+          await sendDbAuditLog({
+            action: 'UPDATE',
+            entity: 'school_data',
+            summary: `Attendance saved for ${rowsToSave.length} student rows`,
+            payload: { date: selectedDate, className: selectedClass, rowCount: rowsToSave.length },
+          });
+          addNotification('Attendance saved', `Attendance for ${selectedClass} on ${selectedDate} was updated successfully.`, 'Success');
+          setConfirmState({ open: false, acknowledge: false, busy: false });
+        } catch (err) {
+          setError(err.message || 'Unable to save attendance.');
+          setConfirmState((current) => ({ ...current, busy: false }));
+        }
+      },
+    });
   };
 
   const filteredRegister = register.filter((row) => selectedClass === 'All Classes' || row.className === selectedClass);
@@ -1205,6 +1492,18 @@ export const AttendancePage = () => {
 
   return (
     <div className="space-y-6">
+      <WriteConfirmModal
+        open={confirmState.open}
+        title={confirmState.title}
+        description={confirmState.description}
+        impactLines={confirmState.impactLines || []}
+        confirmationLabel={confirmState.confirmationLabel}
+        acknowledge={confirmState.acknowledge}
+        onAcknowledge={(value) => setConfirmState((current) => ({ ...current, acknowledge: value }))}
+        onCancel={() => setConfirmState({ open: false, acknowledge: false, busy: false })}
+        onConfirm={() => confirmState.onConfirm?.()}
+        busy={confirmState.busy}
+      />
       <PageHeader eyebrow="Attendance Workflow" title="Attendance" description="Fast teacher-friendly attendance marking with day-level controls and trend visibility." />
       {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
       <div className="grid gap-6 xl:grid-cols-[1.15fr,0.85fr]">
@@ -1275,6 +1574,7 @@ export const AcademicRecordsPage = () => {
   const [marksRows, setMarksRows] = useState([]);
   const [studentDirectory, setStudentDirectory] = useState([]);
   const [error, setError] = useState('');
+  const [confirmState, setConfirmState] = useState({ open: false, acknowledge: false, busy: false });
   const [entryForm, setEntryForm] = useState({
     studentId: '',
     subject: '',
@@ -1306,6 +1606,10 @@ export const AcademicRecordsPage = () => {
       .catch((err) => setError(err.message || 'Unable to load academic records.'));
   }, []);
 
+  useEffect(() => {
+    if (confirmState.open) playWriteAlertTone();
+  }, [confirmState.open]);
+
   const saveEntry = async (mode) => {
     if (!entryForm.studentId || !entryForm.subject || !entryForm.latest || !entryForm.assessment) {
       alert('Please complete class, student, assessment, and score.');
@@ -1320,34 +1624,71 @@ export const AcademicRecordsPage = () => {
       status: mode === 'upload' ? 'Uploaded' : 'Draft',
     };
 
-    setMarksRows([newRow, ...marksRows]);
-    try {
-      const existingMarks = student?.marks || [];
-      const nextMarks = [
-        ...existingMarks.filter((mark) => mark.subject !== entryForm.subject),
-        { subject: entryForm.subject, latest: Number(entryForm.latest), term1: Number(entryForm.latest), term2: Number(entryForm.latest), teacherRemark: entryForm.teacherRemark },
-      ];
-      const nextPreview = {
-        ...(student?.previewProfile || {}),
-        marks: nextMarks,
-        academic_average: Number(entryForm.latest),
-      };
-      const { error } = await supabase
-        .from('school_data')
-        .update({ preview_profile: nextPreview, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'academics-page' })
-        .eq('id', entryForm.studentId);
-      if (error) throw error;
-      addNotification(mode === 'upload' ? 'Marks uploaded' : 'Draft saved', `${entryForm.subject} marks for ${student?.name || 'student'} were ${mode === 'upload' ? 'uploaded' : 'saved as draft'}.`, 'Success');
-      setEntryForm({ studentId: '', subject: '', assessment: '', latest: '', teacherRemark: '', className: 'All Classes' });
-    } catch (err) {
-      setError(err.message || 'Unable to save academic record.');
-    }
+    const existingMarks = student?.marks || [];
+    const nextMarks = [
+      ...existingMarks.filter((mark) => mark.subject !== entryForm.subject),
+      { subject: entryForm.subject, latest: Number(entryForm.latest), term1: Number(entryForm.latest), term2: Number(entryForm.latest), teacherRemark: entryForm.teacherRemark },
+    ];
+    const nextPreview = {
+      ...(student?.previewProfile || {}),
+      marks: nextMarks,
+      academic_average: Number(entryForm.latest),
+    };
+
+    setConfirmState({
+      open: true,
+      acknowledge: false,
+      busy: false,
+      title: mode === 'upload' ? 'Confirm Marks Upload' : 'Confirm Draft Save',
+      description: 'This action will update live academic data for the selected student.',
+      impactLines: [
+        `Student: ${student?.name || 'Student'}`,
+        `Subject: ${entryForm.subject}`,
+        `Score: ${entryForm.latest}`,
+      ],
+      confirmationLabel: mode === 'upload' ? 'Upload marks' : 'Save draft',
+      onConfirm: async () => {
+        try {
+          setConfirmState((current) => ({ ...current, busy: true }));
+          setMarksRows([newRow, ...marksRows]);
+          const { error } = await supabase
+            .from('school_data')
+            .update({ preview_profile: nextPreview, updated_on: new Date().toISOString(), updated_by: 'ADMIN', updated_by_id: 'academics-page' })
+            .eq('id', entryForm.studentId);
+          if (error) throw error;
+          await sendDbAuditLog({
+            action: 'UPDATE',
+            entity: 'school_data',
+            summary: `Academic record ${mode} for ${student?.name || 'student'}`,
+            payload: { studentId: entryForm.studentId, subject: entryForm.subject, latest: Number(entryForm.latest) },
+          });
+          addNotification(mode === 'upload' ? 'Marks uploaded' : 'Draft saved', `${entryForm.subject} marks for ${student?.name || 'student'} were ${mode === 'upload' ? 'uploaded' : 'saved as draft'}.`, 'Success');
+          setConfirmState({ open: false, acknowledge: false, busy: false });
+          setEntryForm({ studentId: '', subject: '', assessment: '', latest: '', teacherRemark: '', className: 'All Classes' });
+        } catch (err) {
+          setError(err.message || 'Unable to save academic record.');
+          setConfirmState((current) => ({ ...current, busy: false }));
+        }
+      },
+    });
   };
 
   const filteredMarksRows = marksRows.filter((row) => entryForm.className === 'All Classes' || row.className === entryForm.className);
 
   return (
     <div className="space-y-6">
+      <WriteConfirmModal
+        open={confirmState.open}
+        title={confirmState.title}
+        description={confirmState.description}
+        impactLines={confirmState.impactLines || []}
+        confirmationLabel={confirmState.confirmationLabel}
+        acknowledge={confirmState.acknowledge}
+        onAcknowledge={(value) => setConfirmState((current) => ({ ...current, acknowledge: value }))}
+        onCancel={() => setConfirmState({ open: false, acknowledge: false, busy: false })}
+        onConfirm={() => confirmState.onConfirm?.()}
+        busy={confirmState.busy}
+      />
       <PageHeader eyebrow="Academic Records" title="Academics" description="Subject-wise marks capture, remarking, and trend review in one workspace." />
       {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
       <div className="grid gap-6 xl:grid-cols-[1.05fr,0.95fr]">
@@ -2324,6 +2665,11 @@ export const AdminSettingsPage = () => {
   const [importPreview, setImportPreview] = useState(null);
   const [importError, setImportError] = useState('');
   const [isImporting, setIsImporting] = useState(false);
+  const [confirmState, setConfirmState] = useState({ open: false, acknowledge: false, busy: false });
+
+  useEffect(() => {
+    if (confirmState.open) playWriteAlertTone();
+  }, [confirmState.open]);
 
   const handleSave = () => {
     updateSettings(localSettings);
@@ -2352,22 +2698,60 @@ export const AdminSettingsPage = () => {
       return;
     }
 
-    try {
-      setIsImporting(true);
-      setImportError('');
-      const result = await importWorkbookToSupabase({ supabase, parsedWorkbook: importPreview });
-      alert(`Import completed. ${result.importedStudents} student rows and ${result.importedClasses} class/section groups were pushed to school_data.`);
-      setImportFile(null);
-      setImportPreview(null);
-    } catch (error) {
-      setImportError(error.message || 'Import failed while writing to Supabase.');
-    } finally {
-      setIsImporting(false);
-    }
+    setConfirmState({
+      open: true,
+      acknowledge: false,
+      busy: false,
+      title: 'Confirm Workbook Import',
+      description: 'This import will upsert live student records into the database.',
+      impactLines: [
+        `Workbook: ${importPreview.workbookName}`,
+        `Student rows: ${importPreview.totalRows}`,
+        `Class/section groups: ${importPreview.classes.length}`,
+      ],
+      confirmationLabel: 'Import workbook',
+      onConfirm: async () => {
+        try {
+          setConfirmState((current) => ({ ...current, busy: true }));
+          setIsImporting(true);
+          setImportError('');
+          const result = await importWorkbookToSupabase({ supabase, parsedWorkbook: importPreview });
+          await sendDbAuditLog({
+            action: 'UPSERT',
+            entity: 'school_data',
+            summary: `Workbook imported: ${importPreview.workbookName}`,
+            payload: { importedStudents: result.importedStudents, importedClasses: result.importedClasses },
+          });
+          closeImportConfirmation();
+          alert(`Import completed. ${result.importedStudents} student rows and ${result.importedClasses} class/section groups were pushed to school_data.`);
+          setImportFile(null);
+          setImportPreview(null);
+        } catch (error) {
+          setImportError(error.message || 'Import failed while writing to Supabase.');
+          setConfirmState((current) => ({ ...current, busy: false }));
+        } finally {
+          setIsImporting(false);
+        }
+      },
+    });
   };
+
+  const closeImportConfirmation = () => setConfirmState({ open: false, acknowledge: false, busy: false });
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
+      <WriteConfirmModal
+        open={confirmState.open}
+        title={confirmState.title}
+        description={confirmState.description}
+        impactLines={confirmState.impactLines || []}
+        confirmationLabel={confirmState.confirmationLabel}
+        acknowledge={confirmState.acknowledge}
+        onAcknowledge={(value) => setConfirmState((current) => ({ ...current, acknowledge: value }))}
+        onCancel={closeImportConfirmation}
+        onConfirm={() => confirmState.onConfirm?.()}
+        busy={confirmState.busy}
+      />
       <PageHeader
         eyebrow="System Governance"
         title="Admin Settings"

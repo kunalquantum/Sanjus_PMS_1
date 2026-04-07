@@ -16,6 +16,7 @@ import {
   Line,
   LineChart,
 } from 'recharts';
+import { BarChart3, Download, Filter, HandCoins, IndianRupee, Search, Upload, Users2, Wallet } from 'lucide-react';
 import { HeroSummary, KPIGrid, MetricPill, PageHeader, ProgressBar, SectionCard, StatusBadge, TimelineList } from '../../components/ui';
 import {
   activityLogs,
@@ -24,9 +25,10 @@ import {
 } from '../../data/mockData';
 import { currency, percent } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
-import { exportAdminSnapshotPDF, exportFunderImpactPDF } from '../../utils/exportUtils';
+import { exportAdminSnapshotPDF, exportFunderImpactPDF, exportToPDF } from '../../utils/exportUtils';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabaseClient';
+import { AdminReportDashboard } from './AdminReportDashboard';
 
 const colors = ['#de8710', '#8f4f16', '#f5a12a', '#5d2f0d'];
 
@@ -51,6 +53,15 @@ const buildDashboardStudent = (row) => {
     toNumber(previewProfile.attendance_percent) ||
     toNumber(previewProfile.attendance) ||
     toNumber(generalProfile.attendance_percent);
+  const amount11th = toNumber(facilityProfile.amount_11th);
+  const amount12th = toNumber(facilityProfile.amount_12th);
+  const amount14th = toNumber(facilityProfile.amount_14th);
+  const amount15th = toNumber(facilityProfile.amount_15th);
+  const coachingYear1 = toNumber(facilityProfile.coaching_amount_year_1);
+  const coachingYear2 = toNumber(facilityProfile.coaching_amount_year_2);
+  const totalAmount =
+    toNumber(previewProfile.total_amount) ||
+    amount11th + amount12th + amount14th + amount15th + coachingYear1 + coachingYear2;
 
   return {
     id: row.id,
@@ -70,6 +81,19 @@ const buildDashboardStudent = (row) => {
     updatedBy: row.updated_by || 'Admin',
     schoolName: row.school_name || enrolmentProfile.school_name || 'Sneha Asha School Network',
     sourceSheet: row.source_sheet || 'Excel Upload',
+    sourceRowNumber: toNumber(previewProfile.source_row_number),
+    age:
+      `${generalProfile.age || ''}`.trim() ||
+      (row.date_of_birth ? `${Math.max(0, new Date().getFullYear() - new Date(row.date_of_birth).getFullYear())}` : 'Unknown'),
+    yearOfPassingSSC: `${generalProfile.year_of_passing_ssc || ''}`.trim() || 'Unknown',
+    integrated: `${enrolmentProfile.enrolled_in_11th || generalProfile.integrated || 'Unknown'}`.trim() || 'Unknown',
+    amount11th,
+    amount12th,
+    amount14th,
+    amount15th,
+    coachingYear1,
+    coachingYear2,
+    totalAmount,
     riskLevel:
       (row.entry_status || '').toLowerCase() !== 'completed'
         ? 'Warning'
@@ -223,6 +247,18 @@ const ChartBlock = ({ title, subtitle, children }) => (
     <div className="h-72">{children}</div>
   </SectionCard>
 );
+
+const buildAmountByCategory = (rows, categorySelector, valueSelector = (row) => row.amount11th) =>
+  Object.values(
+    rows.reduce((acc, row) => {
+      const key = categorySelector(row) || 'Unknown';
+      if (!acc[key]) {
+        acc[key] = { name: `${key}`, value: 0 };
+      }
+      acc[key].value += valueSelector(row);
+      return acc;
+    }, {})
+  );
 
 export const AdminDashboard = () => {
   const navigate = useNavigate();
@@ -893,6 +929,6 @@ export const DashboardHome = () => {
   if (role === 'TEACHER') return <TeacherDashboard />;
   if (role === 'STUDENT') return <StudentDashboard />;
   if (role === 'FUNDER') return <FunderDashboard />;
-  return <AdminDashboard />;
+  return <AdminReportDashboard />;
 };
 

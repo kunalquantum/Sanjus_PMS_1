@@ -196,7 +196,7 @@ export const Tabs = ({ tabs, active, onChange }) => (
 );
 
 export const ModalCard = ({ title, description, children }) => (
-  <div className="rounded-[28px] border border-dashed border-brand-200 bg-gradient-to-br from-brand-50/70 to-white p-5 dark:border-brand-500/35 dark:from-brand-500/10 dark:to-white/[0.03]">
+  <div className="rounded-[28px] border border-brand-200/70 bg-[linear-gradient(135deg,rgba(255,250,244,0.98),rgba(245,236,223,0.96))] p-5 shadow-panel dark:border-brand-500/30 dark:bg-[linear-gradient(135deg,rgba(36,28,23,0.98),rgba(24,19,17,0.98))]">
     <h4 className="text-lg font-bold tracking-[-0.02em] text-slate-950 dark:text-white">{title}</h4>
     {description ? <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-white/65">{description}</p> : null}
     <div className="mt-4">{children}</div>
