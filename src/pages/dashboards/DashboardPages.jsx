@@ -20,15 +20,7 @@ import { HeroSummary, KPIGrid, MetricPill, PageHeader, ProgressBar, SectionCard,
 import {
   activityLogs,
   alerts,
-  fundTrend,
-  funders,
-  impactSummary,
   notifications,
-  programDistribution,
-  programs,
-  reportSnapshots,
-  studentGrowthTrend,
-  students,
 } from '../../data/mockData';
 import { currency, percent } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
@@ -36,7 +28,7 @@ import { exportAdminSnapshotPDF, exportFunderImpactPDF } from '../../utils/expor
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabaseClient';
 
-const colors = ['#1d70f5', '#159f6b', '#f59e0b', '#7c3aed'];
+const colors = ['#de8710', '#8f4f16', '#f5a12a', '#5d2f0d'];
 
 const toNumber = (value) => {
   const parsed = Number(value);
@@ -136,6 +128,96 @@ const buildClassBreakdown = (rows) =>
     }, {})
   );
 
+const buildProgramBreakdown = (rows) =>
+  Object.values(
+    rows.reduce((acc, row) => {
+      const key = row.programName || 'General Support';
+      if (!acc[key]) {
+        acc[key] = { name: key, value: 0, received: 0, approved: 0 };
+      }
+      acc[key].value += 1;
+      acc[key].received += row.receivedAmount;
+      acc[key].approved += row.approvedAmount;
+      return acc;
+    }, {})
+  );
+
+const buildStudentGrowthTrend = (rows) =>
+  buildMonthlyTrend(rows).map((item) => ({ month: item.month, students: item.students }));
+
+const buildImpactSummary = (rows) => {
+  const totalStudents = rows.length || 1;
+  const completed = rows.filter((row) => row.entryStatus.toLowerCase() === 'completed').length;
+  const verified = rows.filter((row) => row.aadhaarVerified).length;
+  const averageAttendance = rows.reduce((sum, row) => sum + row.attendance, 0) / totalStudents;
+  const averageMarks = rows.reduce((sum, row) => sum + row.average, 0) / totalStudents;
+
+  return [
+    { metric: 'Completion', value: Math.round((completed / totalStudents) * 100) },
+    { metric: 'Aadhaar', value: Math.round((verified / totalStudents) * 100) },
+    { metric: 'Attendance', value: Math.round(averageAttendance) },
+    { metric: 'Academics', value: Math.round(averageMarks) },
+  ];
+};
+
+const buildReportSnapshots = (rows) => {
+  const totalStudents = rows.length;
+  const completed = rows.filter((row) => row.entryStatus.toLowerCase() === 'completed').length;
+  const totalReceived = rows.reduce((sum, row) => sum + row.receivedAmount, 0);
+  const totalApproved = rows.reduce((sum, row) => sum + row.approvedAmount, 0);
+
+  return [
+    {
+      id: 'rep-1',
+      title: 'School Register Summary',
+      description: `${totalStudents} live student records currently available in the dashboard scope.`,
+      period: 'Current Data',
+      status: 'Ready',
+    },
+    {
+      id: 'rep-2',
+      title: 'Completion & Verification Report',
+      description: `${completed} profiles are completed and ready for school or donor review.`,
+      period: 'Current Data',
+      status: 'Ready',
+    },
+    {
+      id: 'rep-3',
+      title: 'Fund Allocation Snapshot',
+      description: `${currency(totalReceived)} received against ${currency(totalApproved)} approved support.`,
+      period: 'Current Data',
+      status: 'Ready',
+    },
+  ];
+};
+
+const useDashboardData = () => {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const loadRows = async () => {
+      try {
+        setLoading(true);
+        setError('');
+        const { data, error } = await supabase.from('school_data').select('*').order('student_name');
+        if (error) throw error;
+        setRows((data || []).map(buildDashboardStudent));
+      } catch (err) {
+        setError(err.message || 'Unable to load dashboard data.');
+        setRows([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadRows();
+  }, []);
+
+  return { rows, loading, error };
+};
+
 const ChartBlock = ({ title, subtitle, children }) => (
   <SectionCard title={title} subtitle={subtitle} className="h-full">
     <div className="h-72">{children}</div>
@@ -145,12 +227,18 @@ const ChartBlock = ({ title, subtitle, children }) => (
 export const AdminDashboard = () => {
   const navigate = useNavigate();
   const { addNotification } = useAuth();
-  const totalAllocated = programs.reduce((sum, program) => sum + program.budget, 0);
-  const totalUtilized = programs.reduce((sum, program) => sum + program.allocated, 0);
-  const totalStudents = students.length;
-  const activePrograms = programs.filter((program) => program.status !== 'Closed').length;
-  const openAlerts = alerts.filter((alert) => alert.status !== 'Resolved').length;
-  const pendingApprovals = 14;
+  const { rows, loading, error } = useDashboardData();
+  const totalAllocated = rows.reduce((sum, row) => sum + row.approvedAmount, 0);
+  const totalUtilized = rows.reduce((sum, row) => sum + row.receivedAmount, 0);
+  const totalStudents = rows.length;
+  const activePrograms = new Set(rows.map((row) => row.programName).filter(Boolean)).size;
+  const openAlerts = rows.filter((row) => row.riskLevel === 'Critical' || row.riskLevel === 'Warning').length;
+  const pendingApprovals = rows.filter((row) => row.entryStatus.toLowerCase() !== 'completed').length;
+  const fundTrend = buildMonthlyTrend(rows);
+  const studentGrowthTrend = buildStudentGrowthTrend(rows);
+  const programDistribution = buildProgramBreakdown(rows);
+  const classBreakdown = buildClassBreakdown(rows);
+  const utilizationRate = totalAllocated ? percent((totalUtilized / totalAllocated) * 100) : '0%';
   const adminQuickActions = [
     {
       title: 'Add new user',
@@ -230,24 +318,24 @@ export const AdminDashboard = () => {
   const handleExportAdminSnapshot = () => {
     exportAdminSnapshotPDF({
       metrics: [
-        { label: 'Total Students', value: totalStudents, helper: 'Across active NGO programs' },
-        { label: 'Funds Allocated', value: currency(totalAllocated), helper: 'Committed scholarship budget' },
-        { label: 'Utilization', value: percent((totalUtilized / totalAllocated) * 100), helper: 'Verified active spend' },
-        { label: 'Active Programs', value: activePrograms, helper: 'Programs currently running' },
-        { label: 'Pending Approvals', value: pendingApprovals, helper: 'Expense and fund reviews' },
-        { label: 'Open Alerts', value: openAlerts, helper: 'Governance follow-ups' },
+        { label: 'Total Students', value: totalStudents, helper: 'Live student records from school_data' },
+        { label: 'Funds Allocated', value: currency(totalAllocated), helper: 'Approved support across live records' },
+        { label: 'Utilization', value: utilizationRate, helper: 'Received against approved amounts' },
+        { label: 'Active Programs', value: activePrograms, helper: 'Distinct program mappings in data' },
+        { label: 'Pending Approvals', value: pendingApprovals, helper: 'Profiles not yet completed' },
+        { label: 'Open Alerts', value: openAlerts, helper: 'Students requiring follow-up' },
       ],
-      programRows: programs.map((program) => ({
-        name: program.name,
-        budget: currency(program.budget),
-        allocated: currency(program.allocated),
-        students: program.studentCount,
+      programRows: classBreakdown.map((item) => ({
+        name: item.name,
+        budget: currency(item.students ? totalAllocated / item.students : 0),
+        allocated: currency(item.received),
+        students: item.students,
       })),
-      alertRows: alerts.slice(0, 8).map((alert) => ({
-        student: alert.studentName,
-        type: alert.type,
-        severity: alert.severity,
-        owner: alert.owner,
+      alertRows: rows.slice(0, 8).map((row) => ({
+        student: row.name,
+        type: row.entryStatus,
+        severity: row.riskLevel,
+        owner: row.updatedBy,
       })),
       activityRows: activityLogs.slice(0, 8).map((item) => ({
         message: item.message,
@@ -276,25 +364,27 @@ export const AdminDashboard = () => {
         ]}
       />
 
+      {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
+
       <div id="admin-snapshot" className="space-y-10">
 
       <HeroSummary
-        title="NGO Portfolio Overview"
-        description="A unified executive view of scholarships, educational progress, program efficiency, and governance risk across all active operating regions."
+        title="School Portfolio Overview"
+        description="A live executive view of class coverage, completion status, funding movement, and student readiness across the uploaded school register."
         stats={[
-          { label: 'Total Students', value: students.length, helper: 'Across 4 programs' },
-          { label: 'Funds Allocated', value: currency(totalAllocated), helper: 'Committed budget' },
-          { label: 'Utilization', value: percent((totalUtilized / totalAllocated) * 100), helper: 'Active spend' },
-          { label: 'Active Programs', value: programs.filter((p) => p.status !== 'Closed').length, helper: 'Currently running' },
+          { label: 'Total Students', value: totalStudents, helper: 'Across uploaded school records' },
+          { label: 'Funds Allocated', value: currency(totalAllocated), helper: 'Approved support in live data' },
+          { label: 'Utilization', value: utilizationRate, helper: 'Received versus approved support' },
+          { label: 'Active Programs', value: activePrograms, helper: 'Distinct programs in current data' },
         ]}
       />
 
       <KPIGrid
         items={[
-          { label: 'Pending Approvals', value: 14, helper: 'Expense proofs and fund requests', badge: 'Warning' },
-          { label: 'Open Alerts', value: alerts.filter((alert) => alert.status !== 'Resolved').length, helper: 'High-priority follow-ups', badge: 'Critical' },
-          { label: 'Report Readiness', value: '3/4', helper: 'One funder pack in draft', badge: 'In Progress' },
-          { label: 'Proof Compliance', value: '87%', helper: 'Receipts matched against claims' },
+          { label: 'Pending Completion', value: pendingApprovals, helper: 'Student profiles not marked completed', badge: pendingApprovals ? 'Warning' : 'Healthy' },
+          { label: 'Open Alerts', value: openAlerts, helper: 'Attendance, marks, or completion follow-ups', badge: openAlerts ? 'Critical' : 'Healthy' },
+          { label: 'Report Readiness', value: totalStudents ? 'Ready' : 'Waiting', helper: 'Exports reflect live school_data records', badge: totalStudents ? 'Ready' : 'Open' },
+          { label: 'Aadhaar Verified', value: `${rows.filter((row) => row.aadhaarVerified).length}/${totalStudents}`, helper: 'Students verified in current register' },
         ]}
       />
 
@@ -318,25 +408,25 @@ export const AdminDashboard = () => {
                 <YAxis />
                 <Tooltip />
                 <Legend />
-                <Area type="monotone" dataKey="allocated" stroke="#1d70f5" fill="url(#allocatedFill)" strokeWidth={2} />
-                <Area type="monotone" dataKey="utilized" stroke="#159f6b" fill="url(#utilizedFill)" strokeWidth={2} />
+                <Area type="monotone" dataKey="approved" stroke="#de8710" fill="url(#allocatedFill)" strokeWidth={2} />
+                <Area type="monotone" dataKey="received" stroke="#8f4f16" fill="url(#utilizedFill)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           </ChartBlock>
 
-          <ChartBlock title="Student Growth Trend" subtitle="Scholar coverage expansion over the last six months">
+          <ChartBlock title="Student Growth Trend" subtitle="Records added or updated across recent months">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={studentGrowthTrend}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="month" />
                 <YAxis />
                 <Tooltip />
-                <Line type="monotone" dataKey="students" stroke="#1d70f5" strokeWidth={3} dot={{ r: 4 }} />
+                <Line type="monotone" dataKey="students" stroke="#de8710" strokeWidth={3} dot={{ r: 4 }} />
               </LineChart>
             </ResponsiveContainer>
           </ChartBlock>
 
-          <ChartBlock title="Program Distribution" subtitle="Students supported by scholarship program">
+          <ChartBlock title="Program Distribution" subtitle="Students grouped by mapped program">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={programDistribution} dataKey="value" nameKey="name" innerRadius={55} outerRadius={90} paddingAngle={4}>
@@ -390,21 +480,27 @@ export const AdminDashboard = () => {
         </div>
 
         <div className="space-y-6">
-          <SectionCard title="Alerts Panel" subtitle="Items requiring immediate governance attention">
+          <SectionCard title="Live Attention Panel" subtitle="Students currently needing completion or performance follow-up">
             <div className="space-y-3">
-              {alerts.slice(0, 5).map((alert) => (
-                <div key={alert.id} className="rounded-2xl border border-slate-200 p-4">
+              {(rows.filter((row) => row.riskLevel !== 'Healthy').slice(0, 5)).map((row) => (
+                <div key={row.id} className="rounded-2xl border border-slate-200 p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <p className="font-semibold text-slate-950">{alert.studentName}</p>
-                    <StatusBadge status={alert.severity} />
+                    <p className="font-semibold text-slate-950">{row.name}</p>
+                    <StatusBadge status={row.riskLevel} />
                   </div>
-                  <p className="mt-2 text-sm text-slate-500">{alert.message}</p>
-                  <p className="mt-3 text-xs text-slate-400">Owner: {alert.owner}</p>
+                  <p className="mt-2 text-sm text-slate-500">
+                    {row.entryStatus.toLowerCase() !== 'completed'
+                      ? `Profile completion is still ${row.entryStatus}.`
+                      : row.attendance < 75
+                        ? `Attendance is currently ${row.attendance}%, below the healthy threshold.`
+                        : `Academic average is ${row.average}, which needs review.`}
+                  </p>
+                  <p className="mt-3 text-xs text-slate-400">Updated by: {row.updatedBy}</p>
                   <button
-                    onClick={() => openAdminRoute('/alerts', `Alert: ${alert.type}`, `Opening alerts workspace for ${alert.studentName}.`)}
+                    onClick={() => navigate(`/students/${row.id}`)}
                     className="mt-4 rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50"
                   >
-                    Review Alert
+                    Open Student
                   </button>
                 </div>
               ))}
@@ -412,7 +508,7 @@ export const AdminDashboard = () => {
           </SectionCard>
 
           <SectionCard title="Recent Activity" subtitle="Live operations feed">
-            <TimelineList items={activityLogs} />
+            <TimelineList items={loading ? [{ id: 'loading', message: 'Loading school activity...', actor: 'System', time: 'Just now' }] : activityLogs} />
           </SectionCard>
         </div>
       </div>
@@ -423,9 +519,10 @@ export const AdminDashboard = () => {
 
 export const ProjectManagerDashboard = () => {
   const { settings } = useAuth();
-  const highRisk = students.filter((student) => student.riskLevel === 'High');
-  const lowAttendance = students.filter((student) => student.attendance < settings.attendanceThreshold);
-  const lowMarks = students.filter((student) => student.average < settings.academicThreshold);
+  const { rows, error } = useDashboardData();
+  const highRisk = rows.filter((student) => student.riskLevel === 'Critical');
+  const lowAttendance = rows.filter((student) => student.attendance < settings.attendanceThreshold);
+  const lowMarks = rows.filter((student) => student.average < settings.academicThreshold);
 
   return (
     <div className="space-y-10">
@@ -434,23 +531,24 @@ export const ProjectManagerDashboard = () => {
         title="Project Manager Dashboard"
         description="Track student recovery, proof verification, teacher follow-through, and operational interventions across assigned cohorts."
       />
+      {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
       <HeroSummary
         title="Field Operations Desk"
         description="Track student recovery, proof verification, teacher follow-through, and operational interventions across your assigned cohorts."
         stats={[
-          { label: 'Assigned Students', value: 18, helper: 'Direct monitoring' },
+          { label: 'Assigned Students', value: rows.length, helper: 'Live students in current school register' },
           { label: 'Low Attendance', value: lowAttendance.length, helper: 'Critical alerts', badge: 'Critical' },
           { label: 'Low Marks', value: lowMarks.length, helper: 'Intervention needed' },
-          { label: 'Requests', value: 7, helper: 'Awaiting review' },
+          { label: 'Requests', value: rows.filter((student) => student.entryStatus.toLowerCase() !== 'completed').length, helper: 'Profiles awaiting completion' },
         ]}
       />
 
       <KPIGrid
         items={[
-          { label: 'Expense Verifications', value: 9, helper: 'Four claims missing receipts', badge: 'Warning' },
-          { label: 'Update Completion', value: '82%', helper: 'Attendance and marks submissions' },
+          { label: 'Expense Verifications', value: rows.filter((student) => student.receivedAmount < student.approvedAmount).length, helper: 'Students with pending support release', badge: 'Warning' },
+          { label: 'Update Completion', value: percent(rows.length ? (rows.filter((student) => student.entryStatus.toLowerCase() === 'completed').length / rows.length) * 100 : 0), helper: 'Completed records in live data' },
           { label: 'Site Visits', value: settings.homeVisitFrequency, helper: 'Target operational cadence', badge: 'Active' },
-          { label: 'Cohort Health', value: 'Good', helper: 'Based on recent movement', badge: 'Healthy' },
+          { label: 'Cohort Health', value: highRisk.length ? 'Watchlist' : 'Good', helper: 'Based on live attendance and academic signals', badge: highRisk.length ? 'Warning' : 'Healthy' },
         ]}
       />
 
@@ -469,7 +567,7 @@ export const ProjectManagerDashboard = () => {
                 <div className="mt-3 grid grid-cols-3 gap-3 text-sm">
                   <MetricPill label="Attendance" value={student.attendance} format="percent" />
                   <MetricPill label="Average" value={student.average} />
-                  <MetricPill label="Funds" value={student.fundsReceived} format="currency" />
+                  <MetricPill label="Funds" value={student.receivedAmount} format="currency" />
                 </div>
               </div>
             ))}
@@ -478,25 +576,22 @@ export const ProjectManagerDashboard = () => {
 
         <ChartBlock title="Teacher Update Completion" subtitle="Completion rate across school partners">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={students.slice(0, 5).map((student, index) => ({ name: `Teacher ${index + 1}`, completion: 76 + index * 4 }))}>
+            <BarChart data={buildClassBreakdown(rows).slice(0, 5).map((item) => ({ name: item.name, completion: item.students ? Math.round((item.completed / item.students) * 100) : 0 }))}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="name" />
               <YAxis />
               <Tooltip />
-              <Bar dataKey="completion" fill="#1d70f5" radius={[8, 8, 0, 0]} />
+              <Bar dataKey="completion" fill="#de8710" radius={[8, 8, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </ChartBlock>
 
-        <SectionCard title="Recent Interventions" subtitle="Mock workflows and follow-up notes">
+        <SectionCard title="Recent Interventions" subtitle="Live operational follow-up cues">
           <div className="space-y-4">
-            {[
-              'Transport support approved for 3 low-attendance students in Tumakuru.',
-              'Parent counseling session scheduled for Grade 10 board exam cohort.',
-              'Teacher reminders sent for missing science marks upload.',
-              'Expense discrepancy flagged for two device purchase claims.',
-            ].map((item) => (
-              <div key={item} className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">{item}</div>
+            {rows.slice(0, 4).map((student) => (
+              <div key={student.id} className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
+                {student.name} in {student.className}-{student.sectionName} is currently marked {student.entryStatus}, with attendance at {student.attendance || 0}% and academics at {student.average || 0}.
+              </div>
             ))}
           </div>
         </SectionCard>
@@ -508,7 +603,9 @@ export const ProjectManagerDashboard = () => {
 export const TeacherDashboard = () => {
   const navigate = useNavigate();
   const { settings, addNotification } = useAuth();
-  const focusStudents = students.filter((student) => student.average < settings.academicThreshold || student.attendance < settings.attendanceThreshold).slice(0, 6);
+  const { rows, error } = useDashboardData();
+  const focusStudents = rows.filter((student) => student.average < settings.academicThreshold || student.attendance < settings.attendanceThreshold).slice(0, 6);
+  const completionPending = rows.filter((student) => student.entryStatus.toLowerCase() !== 'completed').length;
   const quickActions = [
     { label: 'Mark Attendance', onClick: () => navigate('/attendance') },
     { label: 'Upload Marks', onClick: () => navigate('/academics') },
@@ -523,11 +620,12 @@ export const TeacherDashboard = () => {
         title="Teacher Dashboard"
         description="Designed for fast attendance updates, marks uploads, and early-warning visibility without unnecessary admin friction."
       />
+      {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
       <KPIGrid
         items={[
-          { label: 'Assigned Students', value: 10, helper: 'Across two active classes' },
-          { label: 'Attendance Pending Today', value: 18, helper: 'Morning session not finalized yet', badge: 'Open' },
-          { label: 'Marks Upload Pending', value: 12, helper: 'Subject-wise marks for the latest assessment' },
+          { label: 'Assigned Students', value: rows.length, helper: 'Across the live class register' },
+          { label: 'Attendance Pending Today', value: rows.filter((student) => !student.attendance).length, helper: 'Students missing attendance data', badge: 'Open' },
+          { label: 'Marks Upload Pending', value: rows.filter((student) => !student.average).length, helper: 'Students missing academic averages' },
           { label: 'Students Needing Attention', value: focusStudents.length, helper: 'Based on attendance and performance triggers', badge: 'Warning' },
         ]}
       />
@@ -540,9 +638,9 @@ export const TeacherDashboard = () => {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="font-semibold text-slate-900">{student.name}</p>
-                    <p className="text-sm text-slate-500">Grade {student.grade} - {student.school}</p>
+                    <p className="text-sm text-slate-500">{student.className} - {student.schoolName}</p>
                   </div>
-                  <StatusBadge status={student.academicStatus} />
+                  <StatusBadge status={student.entryStatus} />
                 </div>
                 <div className="mt-3 space-y-2">
                   <div>
@@ -572,12 +670,12 @@ export const TeacherDashboard = () => {
 
           <ChartBlock title="Grade Trend" subtitle="Recent academic improvement across your class">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={studentGrowthTrend.map((entry, index) => ({ month: entry.month, score: 61 + index * 4 }))}>
+              <LineChart data={buildStudentGrowthTrend(rows).map((entry, index) => ({ month: entry.month, score: Math.min(100, 55 + index * 5 + completionPending) }))}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="month" />
                 <YAxis domain={[50, 90]} />
                 <Tooltip />
-                <Line type="monotone" dataKey="score" stroke="#159f6b" strokeWidth={3} />
+                <Line type="monotone" dataKey="score" stroke="#8f4f16" strokeWidth={3} />
               </LineChart>
             </ResponsiveContainer>
           </ChartBlock>
@@ -589,7 +687,16 @@ export const TeacherDashboard = () => {
 
 export const StudentDashboard = () => {
   const { user } = useAuth();
-  const student = students.find((item) => item.id === user.studentId) || students[0];
+  const { rows, error } = useDashboardData();
+  const student = rows.find((item) => item.id === user?.studentId || item.pen === user?.studentId) || rows[0];
+
+  if (error) {
+    return <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>;
+  }
+
+  if (!student) {
+    return <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">No student record is available yet.</div>;
+  }
 
   return (
     <div className="space-y-10">
@@ -600,10 +707,10 @@ export const StudentDashboard = () => {
       />
       <KPIGrid
         items={[
-          { label: 'Scholarship Received', value: currency(student.fundsReceived), helper: 'Total disbursed so far this year' },
+          { label: 'Scholarship Received', value: currency(student.receivedAmount), helper: 'Total disbursed so far this year' },
           { label: 'Attendance', value: percent(student.attendance), helper: 'Based on latest verified month' },
           { label: 'Academic Average', value: student.average, helper: 'Across your core subjects' },
-          { label: 'Pending Uploads', value: student.pendingDocs.length || 1, helper: 'Receipts and progress proofs awaiting submission', badge: 'Open' },
+          { label: 'Pending Uploads', value: student.entryStatus.toLowerCase() === 'completed' ? 0 : 1, helper: 'Profile completion and supporting records awaiting submission', badge: student.entryStatus.toLowerCase() === 'completed' ? 'Healthy' : 'Open' },
         ]}
       />
 
@@ -611,19 +718,22 @@ export const StudentDashboard = () => {
         <div className="space-y-6">
           <ChartBlock title="Your Grade Trend" subtitle="Progress across recent months">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={student.attendanceHistory}>
+              <LineChart data={buildStudentGrowthTrend(rows).map((entry) => ({ month: entry.month, score: student.average || 0 }))}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="month" />
                 <YAxis domain={[50, 100]} />
                 <Tooltip />
-                <Line type="monotone" dataKey="score" stroke="#1d70f5" strokeWidth={3} />
+                <Line type="monotone" dataKey="score" stroke="#de8710" strokeWidth={3} />
               </LineChart>
             </ResponsiveContainer>
           </ChartBlock>
 
-          <SectionCard title="Installment History" subtitle="Planned and completed scholarship installments">
+          <SectionCard title="Support Summary" subtitle="Approved and received scholarship support">
             <div className="space-y-3">
-              {student.installments.map((installment) => (
+              {[
+                { id: 'approved', label: 'Approved Support', amount: student.approvedAmount, status: 'Approved', date: student.academicYear },
+                { id: 'received', label: 'Received Support', amount: student.receivedAmount, status: student.receivedAmount ? 'Disbursed' : 'Pending', date: student.updatedOn || 'Awaiting update' },
+              ].map((installment) => (
                 <div key={installment.id} className="flex items-center justify-between rounded-2xl border border-slate-200 p-4">
                   <div>
                     <p className="font-semibold text-slate-900">{installment.label}</p>
@@ -642,9 +752,10 @@ export const StudentDashboard = () => {
         <div className="space-y-6">
           <SectionCard title="Pending Uploads" subtitle="Complete these items to keep disbursement on track">
             <div className="space-y-3">
-              {(student.pendingDocs.length ? student.pendingDocs : ['April transport receipt']).map((item) => (
+              {(student.entryStatus.toLowerCase() === 'completed' ? [] : ['Complete your student profile']).map((item) => (
                 <div key={item} className="rounded-2xl bg-amber-50 p-4 text-sm text-amber-800">{item}</div>
               ))}
+              {student.entryStatus.toLowerCase() === 'completed' ? <div className="rounded-2xl bg-emerald-50 p-4 text-sm text-emerald-700">All required student records are complete.</div> : null}
             </div>
           </SectionCard>
 
@@ -665,11 +776,15 @@ export const StudentDashboard = () => {
 };
 
 export const FunderDashboard = () => {
-  const totalFunded = funders.reduce((sum, funder) => sum + funder.commitment, 0);
-  const totalStudents = funders.reduce((sum, funder) => sum + funder.studentsSupported, 0);
-  const totalProgramUtilized = programs.reduce((sum, program) => sum + program.allocated, 0);
-  const totalProgramBudget = programs.reduce((sum, program) => sum + program.budget, 0);
+  const { rows, error } = useDashboardData();
+  const totalFunded = rows.reduce((sum, row) => sum + row.approvedAmount, 0);
+  const totalStudents = rows.length;
+  const totalProgramUtilized = rows.reduce((sum, row) => sum + row.receivedAmount, 0);
+  const totalProgramBudget = rows.reduce((sum, row) => sum + row.approvedAmount, 0);
   const utilizationRate = totalProgramBudget ? percent((totalProgramUtilized / totalProgramBudget) * 100) : '0%';
+  const impactSummary = buildImpactSummary(rows);
+  const reportSnapshots = buildReportSnapshots(rows);
+  const programBreakdown = buildProgramBreakdown(rows);
 
   const handleExportFunderImpact = () => {
     exportFunderImpactPDF({
@@ -679,11 +794,11 @@ export const FunderDashboard = () => {
         { label: 'Utilization', value: utilizationRate, helper: 'Verified against approved use' },
         { label: 'Impact Summary', value: 'Strong', helper: 'Attendance and grade stability improving' },
       ],
-      programRows: programs.map((program) => ({
+      programRows: programBreakdown.map((program) => ({
         program: program.name,
-        budget: currency(program.budget),
-        utilized: currency(program.allocated),
-        status: program.status,
+        budget: currency(program.approved),
+        utilized: currency(program.received),
+        status: program.value ? 'Active' : 'Draft',
       })),
       impactRows: impactSummary.map((item) => ({
         metric: item.metric,
@@ -713,6 +828,7 @@ export const FunderDashboard = () => {
           </button>,
         ]}
       />
+      {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
       <div id="funder-report" className="space-y-10">
       <KPIGrid
         items={[
@@ -726,14 +842,14 @@ export const FunderDashboard = () => {
       <div className="grid gap-6 xl:grid-cols-[1fr,1fr,0.85fr]">
         <ChartBlock title="Funding by Program" subtitle="Commitment and utilization overview">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={programs.map((program) => ({ name: program.name.split(' ')[0], budget: program.budget / 100000, utilized: program.allocated / 100000 }))}>
+            <BarChart data={programBreakdown.map((program) => ({ name: program.name.split(' ')[0], budget: program.approved / 100000, utilized: program.received / 100000 }))}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="name" />
               <YAxis />
               <Tooltip />
               <Legend />
-              <Bar dataKey="budget" fill="#1d70f5" radius={[8, 8, 0, 0]} />
-              <Bar dataKey="utilized" fill="#159f6b" radius={[8, 8, 0, 0]} />
+              <Bar dataKey="budget" fill="#de8710" radius={[8, 8, 0, 0]} />
+              <Bar dataKey="utilized" fill="#8f4f16" radius={[8, 8, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </ChartBlock>
