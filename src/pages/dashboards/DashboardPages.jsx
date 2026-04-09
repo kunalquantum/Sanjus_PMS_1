@@ -565,6 +565,27 @@ const AdminReportDashboard = () => {
     [searchedRows]
   );
 
+  const activeFilters = useMemo(
+    () =>
+      [
+        selectedSheet !== 'All Batch' ? { label: 'Batch', value: selectedSheet } : null,
+        selectedGender !== 'All' ? { label: 'Gender', value: selectedGender } : null,
+        selectedAge !== 'All' ? { label: 'Age', value: selectedAge } : null,
+        selectedPassingYear !== 'All' ? { label: 'SSC Year', value: selectedPassingYear } : null,
+        selectedIntegrated !== 'All' ? { label: 'Integrated', value: selectedIntegrated } : null,
+      ].filter(Boolean),
+    [selectedAge, selectedGender, selectedIntegrated, selectedPassingYear, selectedSheet]
+  );
+
+  const resetFilters = () => {
+    setSelectedSheet('All Batch');
+    setSelectedGender('All');
+    setSelectedAge('All');
+    setSelectedPassingYear('All');
+    setSelectedIntegrated('All');
+    setTableSearch('');
+  };
+
   const handleExport = () => {
     exportToPDF('admin-report-dashboard', 'snehasha-dashboard.pdf', {
       title: 'SnehaAsha Dashboard',
@@ -642,24 +663,49 @@ const AdminReportDashboard = () => {
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-3">
-          <select value={selectedSheet} onChange={(event) => setSelectedSheet(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
-            {availableSheets.map((sheet) => (
-              <option key={sheet} value={sheet}>{sheet}</option>
-            ))}
-          </select>
-          <select value={selectedGender} onChange={(event) => setSelectedGender(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
-            {filterOptions.genders.map((option) => <option key={option} value={option}>{option}</option>)}
-          </select>
-          <select value={selectedAge} onChange={(event) => setSelectedAge(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
-            {filterOptions.ages.map((option) => <option key={option} value={option}>{option === 'All' ? 'Age' : option}</option>)}
-          </select>
-          <select value={selectedPassingYear} onChange={(event) => setSelectedPassingYear(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
-            {filterOptions.passingYears.map((option) => <option key={option} value={option}>{option === 'All' ? 'Year Of Passing SSC' : option}</option>)}
-          </select>
-          <select value={selectedIntegrated} onChange={(event) => setSelectedIntegrated(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
-            {filterOptions.integrated.map((option) => <option key={option} value={option}>{option === 'All' ? 'Integrated Yes Or No' : option}</option>)}
-          </select>
+        <div className="rounded-[28px] border border-slate-200 bg-slate-50/70 p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <select value={selectedSheet} onChange={(event) => setSelectedSheet(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+              {availableSheets.map((sheet) => (
+                <option key={sheet} value={sheet}>{sheet === 'Summary Dashboard' ? 'Batch' : sheet}</option>
+              ))}
+            </select>
+            <select value={selectedGender} onChange={(event) => setSelectedGender(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+              {filterOptions.genders.map((option) => <option key={option} value={option}>{option === 'All' ? 'Gender' : option}</option>)}
+            </select>
+            <select value={selectedAge} onChange={(event) => setSelectedAge(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+              {filterOptions.ages.map((option) => <option key={option} value={option}>{option === 'All' ? 'Age' : option}</option>)}
+            </select>
+            <select value={selectedPassingYear} onChange={(event) => setSelectedPassingYear(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+              {filterOptions.passingYears.map((option) => <option key={option} value={option}>{option === 'All' ? 'Year Of Passing SSC' : option}</option>)}
+            </select>
+            <select value={selectedIntegrated} onChange={(event) => setSelectedIntegrated(event.target.value)} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 outline-none">
+              {filterOptions.integrated.map((option) => <option key={option} value={option}>{option === 'All' ? 'Integrated Yes Or No' : option}</option>)}
+            </select>
+            <button
+              onClick={resetFilters}
+              className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+            >
+              Reset Filters
+            </button>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <div className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">
+              Showing {searchedRows.length} of {rows.length} records
+            </div>
+            {activeFilters.length ? (
+              activeFilters.map((filter) => (
+                <div key={`${filter.label}-${filter.value}`} className="rounded-full border border-brand-200 bg-white px-4 py-2 text-sm font-medium text-slate-700">
+                  <span className="text-slate-400">{filter.label}:</span> {filter.value}
+                </div>
+              ))
+            ) : (
+              <div className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-500">
+                No filters applied
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="grid gap-4 xl:grid-cols-4">
@@ -928,12 +974,6 @@ export const AdminDashboard = () => {
   const utilizationRate = totalAllocated ? percent((totalUtilized / totalAllocated) * 100) : '0%';
   const adminQuickActions = [
     {
-      title: 'Add new user',
-      body: 'Invite staff, teachers, or funders into the workspace.',
-      path: '/users',
-      notice: 'Opening user management to invite a new user.',
-    },
-    {
       title: 'Add student',
       body: 'Create a new beneficiary profile and assign scholarship eligibility.',
       path: '/students',
@@ -957,12 +997,6 @@ export const AdminDashboard = () => {
       path: '/alerts',
       notice: 'Opening alerts so you can launch an intervention workflow.',
     },
-    {
-      title: 'Disburse installment',
-      body: 'Move approved scholarship installments into payout-ready state.',
-      path: '/funds',
-      notice: 'Opening fund disbursement to review payout-ready installments.',
-    },
   ];
   const operationsHubActions = [
     {
@@ -971,20 +1005,6 @@ export const AdminDashboard = () => {
       meta: 'Ready to launch',
       path: '/students',
       notice: 'Opening student onboarding operations.',
-    },
-    {
-      title: 'Program assignment',
-      body: 'Assign project manager ownership to new student cohorts.',
-      meta: '6 pending',
-      path: '/programs',
-      notice: 'Opening programs to manage cohort assignment.',
-    },
-    {
-      title: 'Scholarship approval queue',
-      body: 'Review newly submitted cases before financial commitment.',
-      meta: '9 pending',
-      path: '/funds',
-      notice: 'Opening the scholarship approval and disbursement queue.',
     },
     {
       title: 'Document compliance chase',
@@ -1040,9 +1060,8 @@ export const AdminDashboard = () => {
         title="Admin Dashboard"
         description="A unified view of scholarships, educational progress, program efficiency, and governance risk across the NGO portfolio."
         actions={[
-          <button key="1" onClick={() => navigate('/programs')} className="rounded-2xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white">Create Program</button>,
           <button 
-            key="2" 
+            key="1" 
             onClick={handleExportAdminSnapshot}
             className="rounded-2xl bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50 active:scale-95"
           >

@@ -226,6 +226,29 @@ const formatStudentDate = (value) => {
   return date.toLocaleDateString('en-GB');
 };
 
+const toFiniteNumber = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const getPreviewAttendanceValue = (previewProfile = {}, generalProfile = {}) => {
+  return toFiniteNumber(
+    previewProfile.attendance_percent ??
+    previewProfile.attendance ??
+    generalProfile.attendance_percent ??
+    0
+  );
+};
+
+const getPreviewAverageValue = (previewProfile = {}, enrolmentProfile = {}) => {
+  return toFiniteNumber(
+    previewProfile.academic_average ??
+    previewProfile.average ??
+    enrolmentProfile.academic_average ??
+    0
+  );
+};
+
 const mapSchoolDataRow = (row, index = 0) => {
   const generalProfile = row.general_profile || {};
   const enrolmentProfile = row.enrolment_profile || {};
@@ -260,8 +283,8 @@ const mapSchoolDataRow = (row, index = 0) => {
         phone: row.guardian_phone || generalProfile.parent_contact_no || '-',
       },
       academicYear: row.academic_year || '2025-26',
-      attendance: Number(previewProfile.attendance || 0),
-      average: Number(previewProfile.academic_average || 0),
+      attendance: getPreviewAttendanceValue(previewProfile, generalProfile),
+      average: getPreviewAverageValue(previewProfile, enrolmentProfile),
       academicStatus: previewProfile.academic_status || row.entry_status || 'Draft',
       riskLevel: facilityProfile.interventionLevel || previewProfile.risk_level || 'Low',
       pendingDocs: previewProfile.pending_docs || [],
@@ -2358,31 +2381,117 @@ export const AlertsPage = () => {
 export const ReportsPage = () => {
   const { addNotification } = useAuth();
   const [liveStudents, setLiveStudents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [dateFilter, setDateFilter] = useState('This Month');
   const [programFilter, setProgramFilter] = useState('All Programs');
   const [regionFilter, setRegionFilter] = useState('All Regions');
   const [studentFilter, setStudentFilter] = useState('All Students');
-  const [funderFilter, setFunderFilter] = useState('All Funders');
+  const [tableSearch, setTableSearch] = useState('');
 
   useEffect(() => {
-    fetchSchoolDataStudents().then(setLiveStudents).catch(() => setLiveStudents([]));
+    const loadStudents = async () => {
+      try {
+        setLoading(true);
+        setLoadError('');
+        const students = await fetchSchoolDataStudents();
+        setLiveStudents(students);
+      } catch (error) {
+        setLoadError(error.message || 'Unable to load report data.');
+        setLiveStudents([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadStudents();
   }, []);
 
-  const filteredStudents = liveStudents.filter((student) => {
-    const matchesProgram = programFilter === 'All Programs' || student.programName === programFilter;
-    const matchesRegion = regionFilter === 'All Regions' || student.region === regionFilter;
-    const matchesStudent = studentFilter === 'All Students' || student.name === studentFilter;
-    return matchesProgram && matchesRegion && matchesStudent;
-  });
+  const matchesDateRange = (student) => {
+    if (dateFilter === 'FY 2025-26') return true;
+    const sourceDate = student.updatedOn || '';
+    const parsed = new Date(sourceDate);
+    if (Number.isNaN(parsed.getTime())) return dateFilter !== 'This Month';
+    const now = new Date();
+
+    if (dateFilter === 'This Month') {
+      return parsed.getMonth() === now.getMonth() && parsed.getFullYear() === now.getFullYear();
+    }
+
+    if (dateFilter === 'Last Quarter') {
+      const quarterStart = new Date(now.getFullYear(), Math.max(0, now.getMonth() - 3), 1);
+      return parsed >= quarterStart && parsed <= now;
+    }
+
+    return true;
+  };
+
+  const filteredStudents = useMemo(
+    () =>
+      liveStudents.filter((student) => {
+        const matchesProgram = programFilter === 'All Programs' || student.programName === programFilter;
+        const matchesRegion = regionFilter === 'All Regions' || student.region === regionFilter;
+        const matchesStudent = studentFilter === 'All Students' || student.name === studentFilter;
+        const matchesSearch =
+          !tableSearch.trim() ||
+          [student.name, student.programName, student.region, student.school]
+            .filter(Boolean)
+            .some((value) => `${value}`.toLowerCase().includes(tableSearch.trim().toLowerCase()));
+
+        return matchesProgram && matchesRegion && matchesStudent && matchesSearch && matchesDateRange(student);
+      }),
+    [dateFilter, liveStudents, programFilter, regionFilter, studentFilter, tableSearch]
+  );
+
+  const reportSummary = useMemo(() => {
+    const totalApproved = filteredStudents.reduce((sum, student) => sum + (student.scholarshipApproved || 0), 0);
+    const totalReceived = filteredStudents.reduce((sum, student) => sum + (student.fundsReceived || 0), 0);
+    const completed = filteredStudents.filter((student) => `${student.entryStatus}`.toLowerCase() === 'completed').length;
+    const avgAttendance = filteredStudents.length
+      ? Math.round(filteredStudents.reduce((sum, student) => sum + Number(student.attendance || 0), 0) / filteredStudents.length)
+      : 0;
+
+    return {
+      totalApproved,
+      totalReceived,
+      completed,
+      avgAttendance,
+      regions: new Set(filteredStudents.map((student) => student.region)).size || 0,
+    };
+  }, [filteredStudents]);
 
   const filteredReports = useMemo(
     () => [
-      { id: 'r1', title: 'Class Register Summary', description: `Live rollup for ${filteredStudents.length} students currently in scope.`, period: dateFilter, status: 'Ready' },
-      { id: 'r2', title: 'Completion And Verification Pack', description: 'Tracks entry status and Aadhaar verification across current filters.', period: dateFilter, status: 'Ready' },
-      { id: 'r3', title: 'Scholarship Allocation Snapshot', description: 'Approved and received scholarship amounts from the live school data table.', period: dateFilter, status: 'Ready' },
+      { id: 'r1', title: 'Class Register Summary', description: `Live rollup for ${filteredStudents.length} students currently in scope.`, period: dateFilter, status: filteredStudents.length ? 'Ready' : 'Open' },
+      { id: 'r2', title: 'Completion And Verification Pack', description: `${reportSummary.completed} profiles are completed under the current filters.`, period: dateFilter, status: filteredStudents.length ? 'Ready' : 'Open' },
+      { id: 'r3', title: 'Scholarship Allocation Snapshot', description: `${currency(reportSummary.totalReceived)} received against ${currency(reportSummary.totalApproved)} approved support.`, period: dateFilter, status: filteredStudents.length ? 'Ready' : 'Open' },
     ],
-    [dateFilter, filteredStudents.length]
+    [dateFilter, filteredStudents.length, reportSummary.completed, reportSummary.totalApproved, reportSummary.totalReceived]
   );
+
+  const reportRows = useMemo(
+    () =>
+      filteredStudents.map((student) => ({
+        student_name: student.name,
+        program: student.programName || '-',
+        region: student.region || '-',
+        school: student.school || '-',
+        attendance: `${toFiniteNumber(student.attendance)}%`,
+        marks: `${toFiniteNumber(student.average)}%`,
+        approved: currency(student.scholarshipApproved || 0),
+        received: currency(student.fundsReceived || 0),
+        status: student.entryStatus,
+      })),
+    [filteredStudents]
+  );
+
+  const exportCurrentScopeCSV = () => {
+    exportRowsToCSV(
+      reportRows.length ? reportRows : [{ note: 'No student rows available for current filters' }],
+      `reports_current_scope_${dateFilter.replace(/[^a-z0-9]+/gi, '_')}.csv`
+    );
+    addNotification('Scope exported', 'Current filtered report rows were exported as CSV.', 'Success');
+  };
 
   const handleExportReportPDF = (report) => {
     exportReportPackPDF({
@@ -2392,13 +2501,13 @@ export const ReportsPage = () => {
         program: programFilter,
         region: regionFilter,
         student: studentFilter,
-        funder: funderFilter,
+        funder: 'Live school data scope',
       },
       studentRows: filteredStudents.map((student) => ({
         student_name: student.name,
         program: student.programName,
-        attendance: `${student.attendance}%`,
-        marks: `${student.average}%`,
+        attendance: `${toFiniteNumber(student.attendance)}%`,
+        marks: `${toFiniteNumber(student.average)}%`,
       })),
       filename: `${report.title.replace(/[^a-z0-9]+/gi, '_')}.pdf`,
     });
@@ -2413,8 +2522,8 @@ export const ReportsPage = () => {
       grade: student.grade,
       region: student.region,
       program: student.programName,
-      attendance_percent: student.attendance,
-      academic_average: student.average,
+      attendance_percent: toFiniteNumber(student.attendance),
+      academic_average: toFiniteNumber(student.average),
       funds_received: student.fundsReceived,
       academic_status: student.academicStatus,
       risk_level: student.riskLevel,
@@ -2429,13 +2538,21 @@ export const ReportsPage = () => {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Reporting Center" title="Reports" description="Build NGO and CSR-friendly reporting views with export-oriented cards, filters, and narrative preview sections." />
+      <PageHeader
+        eyebrow="Reporting Center"
+        title="Reports"
+        description="Generate live NGO and CSR-ready report views from the connected database with exports tied to the current filter scope."
+        actions={[
+          <button key="export-scope" onClick={exportCurrentScopeCSV} className="rounded-2xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white">Export Current Scope</button>,
+        ]}
+      />
+      {loadError ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{loadError}</div> : null}
       <KPIGrid
         items={[
           { label: 'Reports Ready', value: filteredReports.length, helper: 'Available for export in current filter view' },
-          { label: 'Regions Covered', value: new Set(filteredStudents.map((student) => student.region)).size || 0, helper: 'Active regions in current scope' },
+          { label: 'Regions Covered', value: reportSummary.regions, helper: 'Active regions in current scope' },
           { label: 'Students Included', value: filteredStudents.length, helper: 'Impact and finance reports scoped' },
-          { label: 'Funder Packs', value: filteredReports.length, helper: 'Partner-specific transparency decks' },
+          { label: 'Approved Support', value: currency(reportSummary.totalApproved), helper: 'Total approved amount in current scope' },
         ]}
       />
       <FilterBar
@@ -2444,7 +2561,7 @@ export const ReportsPage = () => {
           { label: 'Program', options: ['All Programs', ...new Set(liveStudents.map((student) => student.programName))], value: programFilter, onChange: (e) => setProgramFilter(e.target.value) },
           { label: 'Region', options: ['All Regions', ...new Set(liveStudents.map((student) => student.region))], value: regionFilter, onChange: (e) => setRegionFilter(e.target.value) },
           { label: 'Student', options: ['All Students', ...liveStudents.slice(0, 20).map((student) => student.name)], value: studentFilter, onChange: (e) => setStudentFilter(e.target.value) },
-          { label: 'Funder', options: ['All Funders', 'Tata CSR Foundation', 'Infosys Social Impact', 'Wipro Education Trust'], value: funderFilter, onChange: (e) => setFunderFilter(e.target.value) },
+          { label: 'Search', type: 'search', placeholder: 'Search student, school, region', value: tableSearch, onChange: (e) => setTableSearch(e.target.value) },
         ]}
       />
       <div className="grid gap-6 xl:grid-cols-[1fr,1fr]">
@@ -2478,6 +2595,44 @@ export const ReportsPage = () => {
               </LineChart>
             </ResponsiveContainer>
           </div>
+        </SectionCard>
+      </div>
+      <div className="grid gap-6 xl:grid-cols-[0.8fr,1.2fr]">
+        <SectionCard title="Reporting Summary" subtitle="What the current report scope contains">
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Current Scope</p>
+              <div className="mt-3 space-y-2 text-sm text-slate-600">
+                <p>Date range: <span className="font-semibold text-slate-900">{dateFilter}</span></p>
+                <p>Program: <span className="font-semibold text-slate-900">{programFilter}</span></p>
+                <p>Region: <span className="font-semibold text-slate-900">{regionFilter}</span></p>
+                <p>Student: <span className="font-semibold text-slate-900">{studentFilter}</span></p>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <MetricPill label="Completed Profiles" value={`${reportSummary.completed}/${filteredStudents.length || 0}`} />
+              <MetricPill label="Average Attendance" value={reportSummary.avgAttendance} format="percent" />
+              <MetricPill label="Approved Support" value={reportSummary.totalApproved} format="currency" />
+              <MetricPill label="Received Support" value={reportSummary.totalReceived} format="currency" />
+            </div>
+          </div>
+        </SectionCard>
+
+        <SectionCard title="Live Report Rows" subtitle="Rows currently included in the report exports">
+          <Table
+            columns={[
+              { key: 'student_name', label: 'Student' },
+              { key: 'program', label: 'Program' },
+              { key: 'region', label: 'Region' },
+              { key: 'school', label: 'School' },
+              { key: 'attendance', label: 'Attendance' },
+              { key: 'marks', label: 'Marks' },
+              { key: 'approved', label: 'Approved' },
+              { key: 'received', label: 'Received' },
+              { key: 'status', label: 'Status', render: (value) => <StatusBadge status={value} /> },
+            ]}
+            rows={reportRows.length ? reportRows : [{ student_name: 'No matching students', program: '-', region: '-', school: '-', attendance: '-', marks: '-', approved: '-', received: '-', status: 'Open' }]}
+          />
         </SectionCard>
       </div>
     </div>

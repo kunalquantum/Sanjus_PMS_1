@@ -48,6 +48,8 @@ const navigationLinks = [
   { path: '/settings', label: 'Settings', icon: Settings, roles: ['ADMIN'] },
 ];
 
+const upcomingFeaturePaths = new Set(['/users', '/programs', '/funds']);
+
 const roleTone = {
   ADMIN: 'School Command Desk',
   PROJECT_MANAGER: 'Field Operations',
@@ -123,7 +125,10 @@ export const AppShell = ({ children }) => {
 
   const unreadCount = useMemo(() => notifications.filter(n => !n.read).length, [notifications]);
 
-  const filteredLinks = useMemo(() => navigationLinks.filter((link) => link.roles.includes(role)), [role]);
+  const filteredLinks = useMemo(
+    () => navigationLinks.filter((link) => link.roles.includes(role) && !upcomingFeaturePaths.has(link.path)),
+    [role]
+  );
 
   const breadcrumbs = useMemo(() => {
     const parts = location.pathname.split('/').filter(Boolean);
@@ -145,12 +150,11 @@ export const AppShell = ({ children }) => {
       if (label.includes(query)) return true;
 
       if (query.includes('student') && link.path === '/students') return true;
-      if ((query.includes('user') || query.includes('staff')) && link.path === '/users') return true;
       if ((query.includes('expense') || query.includes('proof')) && (link.path === '/expense-verification' || link.path === '/expenses')) return true;
-      if ((query.includes('fund') || query.includes('disbursement')) && (link.path === '/funds' || link.path === '/fund-utilization')) return true;
+      if ((query.includes('fund') || query.includes('disbursement')) && link.path === '/fund-utilization') return true;
       if ((query.includes('alert') || query.includes('risk') || query.includes('intervention')) && link.path === '/alerts') return true;
       if ((query.includes('report') || query.includes('export')) && link.path === '/reports') return true;
-      if ((query.includes('program') || query.includes('scholarship')) && (link.path === '/programs' || link.path === '/my-scholarship')) return true;
+      if ((query.includes('program') || query.includes('scholarship')) && link.path === '/my-scholarship') return true;
       if ((query.includes('attendance')) && link.path === '/attendance') return true;
       if ((query.includes('academic') || query.includes('marks')) && link.path === '/academics') return true;
       return false;
