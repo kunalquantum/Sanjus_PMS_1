@@ -295,6 +295,13 @@ const SummaryCard = ({ label, value, icon }) => (
   </div>
 );
 
+const DetailPill = ({ label, value }) => (
+  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+    <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">{label}</p>
+    <p className="mt-2 text-lg font-bold text-slate-900">{value}</p>
+  </div>
+);
+
 const AdminReportDashboard = () => {
   const navigate = useNavigate();
   const { addNotification } = useAuth();
@@ -396,6 +403,29 @@ const AdminReportDashboard = () => {
     () => new Set(filteredRows.map((row) => row.pen || row.id)).size,
     [filteredRows]
   );
+  const completedProfiles = useMemo(
+    () => filteredRows.filter((row) => `${row.entryStatus}`.toLowerCase() === 'completed').length,
+    [filteredRows]
+  );
+  const totalApproved = useMemo(
+    () => filteredRows.reduce((sum, row) => sum + row.approvedAmount, 0),
+    [filteredRows]
+  );
+  const totalReceived = useMemo(
+    () => filteredRows.reduce((sum, row) => sum + row.receivedAmount, 0),
+    [filteredRows]
+  );
+  const completionRate = totalTransactions ? Math.round((completedProfiles / totalTransactions) * 100) : 0;
+  const avgAttendance = totalTransactions
+    ? Math.round(filteredRows.reduce((sum, row) => sum + toNumber(row.attendance), 0) / totalTransactions)
+    : 0;
+  const avgAcademics = totalTransactions
+    ? Math.round(filteredRows.reduce((sum, row) => sum + toNumber(row.average), 0) / totalTransactions)
+    : 0;
+  const uniquePrograms = useMemo(
+    () => new Set(filteredRows.map((row) => normalizeFilterValue(row.programName))).size,
+    [filteredRows]
+  );
 
   const amount11thTrend = useMemo(
     () =>
@@ -486,6 +516,53 @@ const AdminReportDashboard = () => {
         }, {})
       ),
     [filteredRows]
+  );
+
+  const ageDistribution = useMemo(
+    () =>
+      Object.values(
+        filteredRows.reduce((acc, row) => {
+          const key = normalizeFilterValue(row.age);
+          if (!acc[key]) {
+            acc[key] = { name: key, students: 0 };
+          }
+          acc[key].students += 1;
+          return acc;
+        }, {})
+      ).sort((a, b) => b.students - a.students),
+    [filteredRows]
+  );
+
+  const schoolBreakdown = useMemo(
+    () =>
+      Object.values(
+        filteredRows.reduce((acc, row) => {
+          const key = normalizeFilterValue(row.schoolName);
+          if (!acc[key]) {
+            acc[key] = { name: key, students: 0, totalAmount: 0 };
+          }
+          acc[key].students += 1;
+          acc[key].totalAmount += row.totalAmount;
+          return acc;
+        }, {})
+      )
+        .sort((a, b) => b.totalAmount - a.totalAmount)
+        .slice(0, 6),
+    [filteredRows]
+  );
+
+  const detailedTableRows = useMemo(
+    () =>
+      searchedRows.map((row) => ({
+        ...row,
+        ageLabel: normalizeFilterValue(row.age),
+        passingYearLabel: normalizeFilterValue(row.yearOfPassingSSC),
+        integratedLabel: normalizeFilterValue(row.integrated),
+        schoolLabel: normalizeFilterValue(row.schoolName),
+        receivedLabel: formatTransactionValue(row.receivedAmount),
+        approvedLabel: formatTransactionValue(row.approvedAmount),
+      })),
+    [searchedRows]
   );
 
   const handleExport = () => {
@@ -592,6 +669,49 @@ const AdminReportDashboard = () => {
           <SummaryCard label="Schools Covered" value={compactNumber(totalSchools)} icon={<Wallet className="h-6 w-6" />} />
         </div>
 
+        <div className="grid gap-4 xl:grid-cols-[1.1fr,0.9fr]">
+          <SectionCard title="Portfolio Detail" subtitle="Live summary generated from the active filters and selected batch">
+            <div className="grid gap-3 md:grid-cols-3">
+              <DetailPill label="Completed Profiles" value={`${completedProfiles}/${totalTransactions || 0}`} />
+              <DetailPill label="Completion Rate" value={`${completionRate}%`} />
+              <DetailPill label="Programs" value={uniquePrograms} />
+              <DetailPill label="Approved Amount" value={currency(totalApproved)} />
+              <DetailPill label="Received Amount" value={currency(totalReceived)} />
+              <DetailPill label="Average Gift" value={currency(averageGift)} />
+              <DetailPill label="Average Attendance" value={`${avgAttendance}%`} />
+              <DetailPill label="Average Academics" value={`${avgAcademics}`} />
+              <DetailPill label="Current Search Rows" value={searchedRows.length} />
+            </div>
+          </SectionCard>
+
+          <SectionCard title="Filter Snapshot" subtitle="What the current dashboard slice is showing from the database">
+            <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <DetailPill label="Sheet" value={selectedSheet} />
+                <DetailPill label="Gender Filter" value={selectedGender} />
+                <DetailPill label="Age Filter" value={selectedAge} />
+                <DetailPill label="SSC Year" value={selectedPassingYear} />
+                <DetailPill label="Integrated" value={selectedIntegrated} />
+                <DetailPill label="Fields Detected" value={fieldCount} />
+              </div>
+              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Top Schools by Total Amount</p>
+                <div className="mt-4 space-y-3">
+                  {schoolBreakdown.map((school) => (
+                    <div key={school.name} className="flex items-center justify-between gap-4 text-sm">
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold text-slate-900">{school.name}</p>
+                        <p className="text-slate-500">{school.students} students</p>
+                      </div>
+                      <p className="font-semibold text-slate-900">{currency(school.totalAmount)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+
         <div className="grid gap-4 xl:grid-cols-2">
           <SectionCard title="11th College Amount Over Time" actions={chartToolbar}>
             <div className="h-72">
@@ -683,6 +803,20 @@ const AdminReportDashboard = () => {
               </ResponsiveContainer>
             </div>
           </SectionCard>
+
+          <SectionCard title="Age Distribution by Beneficiary Count" actions={chartToolbar}>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={ageDistribution}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis allowDecimals={false} />
+                  <Tooltip />
+                  <Bar dataKey="students" fill="#8f4f16" radius={[8, 8, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </SectionCard>
         </div>
 
         <SectionCard
@@ -705,30 +839,67 @@ const AdminReportDashboard = () => {
             <span className="rounded-full bg-slate-100 px-3 py-1">Live Source: school_data</span>
           </div>
           <div className="overflow-x-auto">
-            <table className="min-w-full border-separate border-spacing-0 overflow-hidden rounded-3xl">
+            <table className="min-w-[1600px] border-separate border-spacing-0 overflow-hidden rounded-3xl">
               <thead>
                 <tr className="bg-amber-400 text-left text-sm font-semibold text-slate-900">
-                  {['11th College Amount', '12th College Amount', '1st Year Coaching Amount', '2nd Year Coaching Amount', '14th College Amount', 'Total Amount', 'Student', 'School'].map((heading) => (
-                    <th key={heading} className="px-4 py-3 whitespace-nowrap">{heading}</th>
+                  {[
+                    'Student',
+                    'PEN',
+                    'Program',
+                    'Batch',
+                    'School',
+                    'Age',
+                    'SSC Year',
+                    'Integrated',
+                    'Status',
+                    '11th',
+                    '12th',
+                    'Coaching Y1',
+                    'Coaching Y2',
+                    '14th',
+                    'Approved',
+                    'Received',
+                    'Total',
+                  ].map((heading) => (
+                    <th key={heading} className="sticky top-0 px-4 py-3 whitespace-nowrap">{heading}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {(loading ? [] : searchedRows).slice(0, 20).map((row) => (
-                  <tr key={row.id} className="border-b border-slate-100 text-sm text-slate-700">
-                    <td className="px-4 py-3">{formatTransactionValue(row.amount11th)}</td>
-                    <td className="px-4 py-3">{formatTransactionValue(row.amount12th)}</td>
-                    <td className="px-4 py-3">{formatTransactionValue(row.coachingYear1)}</td>
-                    <td className="px-4 py-3">{formatTransactionValue(row.coachingYear2)}</td>
-                    <td className="px-4 py-3">{formatTransactionValue(row.amount14th)}</td>
-                    <td className="px-4 py-3 font-semibold text-slate-900">{formatTransactionValue(row.totalAmount)}</td>
-                    <td className="px-4 py-3">{row.name}</td>
-                    <td className="px-4 py-3 whitespace-nowrap">{row.schoolName}</td>
+                {(loading ? [] : detailedTableRows).slice(0, 40).map((row, index) => (
+                  <tr key={row.id} className={`border-b border-slate-100 text-sm text-slate-700 ${index % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}`}>
+                    <td className="px-4 py-3">
+                      <div className="min-w-[180px]">
+                        <p className="font-semibold text-slate-900">{row.name}</p>
+                        <p className="text-xs text-slate-500">{row.gender}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.pen || '-'}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.programName || '-'}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.sourceSheet || '-'}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.schoolLabel}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.ageLabel}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.passingYearLabel}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.integratedLabel}</td>
+                    <td className="px-4 py-3"><StatusBadge status={row.entryStatus} /></td>
+                    <td className="px-4 py-3 whitespace-nowrap">{formatTransactionValue(row.amount11th)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{formatTransactionValue(row.amount12th)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{formatTransactionValue(row.coachingYear1)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{formatTransactionValue(row.coachingYear2)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{formatTransactionValue(row.amount14th)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.approvedLabel}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{row.receivedLabel}</td>
+                    <td className="px-4 py-3 whitespace-nowrap font-semibold text-slate-900">{formatTransactionValue(row.totalAmount)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          {!loading && detailedTableRows.length > 40 ? (
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
+              Showing first 40 rows out of {detailedTableRows.length} matching records. Use search and filters to narrow further.
+            </div>
+          ) : null}
           {!loading && !searchedRows.length ? (
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
               No rows matched the selected filters.
